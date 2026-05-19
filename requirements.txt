@@ -1,0 +1,27 @@
+# Core
+numpy
+pandas
+scipy
+h5py
+pyarrow
+uproot  # ROOT TTree reader — SMASH output is ROOT, no pyROOT needed
+
+# ML
+torch
+lightning
+scikit-learn
+
+# Plotting / I/O
+matplotlib
+tqdm
+pyyaml
+
+# Tracking (optional)
+wandb
+tensorboard
+
+# Dev
+pytest
+ruff
+ipykernel
+jupyter
