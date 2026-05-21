@@ -1,4 +1,4 @@
-"""Train DeepSets or Set Transformer from the pre-padded cache.
+"""Train DeepSets, Set Transformer, EFN, or GNN from the pre-padded cache.
 
 Fixed-shape input means the DataLoader does no padding and the GPU memory
 footprint is predictable across batches — both major wins over the variable-
@@ -51,6 +51,9 @@ from src.data.cached_dataset import CachedParticleDataset, collate_cached  # noq
 from src.losses.evidential import evidential_loss, nig_to_moments  # noqa: E402
 from src.models.deepsets import DeepSets, DeepSetsConfig  # noqa: E402
 from src.models.set_transformer import SetTransformer, SetTransformerConfig  # noqa: E402
+from src.models.efn import EFN, EFNConfig  # noqa: E402
+from src.models.gnn import GNN, GNNConfig  # noqa: E402
+from src.models.pfn import PFN, PFNConfig  # noqa: E402
 
 
 def split_indices(n: int, *, seed: int, train: float = 0.8, val: float = 0.1) -> dict[str, np.ndarray]:
@@ -85,6 +88,12 @@ def build_model(arch: str, n_centrality_bins: int) -> nn.Module:
         return SetTransformer(SetTransformerConfig(
             n_centrality_bins=n_centrality_bins, n_sab=1, d_model=64, n_heads=4, ff_hidden=128,
         ))
+    if arch == "efn":
+        return EFN(EFNConfig(n_centrality_bins=n_centrality_bins))
+    if arch == "pfn":
+        return PFN(PFNConfig(n_centrality_bins=n_centrality_bins))
+    if arch == "gnn":
+        return GNN(GNNConfig(n_centrality_bins=n_centrality_bins))
     raise ValueError(f"Unknown arch: {arch!r}")
 
 
@@ -92,13 +101,19 @@ def train_one_epoch(model, loader, opt, ce, device, coeff_reg, w_cls):
     model.train()
     losses = []
     for batch in loader:
-        cont = batch.cont.to(device); pdg_idx = batch.pdg_idx.to(device)
-        mask = batch.mask.to(device); sqrtsNN = batch.sqrtsNN.to(device)
-        y = batch.b.to(device); z = batch.centrality_bin.to(device)
-        out = model(cont, pdg_idx, mask, sqrtsNN)
+        cont   = batch.cont.to(device)
+        mask   = batch.mask.to(device)
+        sqrtsNN = batch.sqrtsNN.to(device)
+        mult   = batch.mult.to(device) if hasattr(batch, "mult") else None
+        y      = batch.b.to(device)
+        z      = batch.centrality_bin.to(device)
+
+        event_feats = _build_event_feats(cont, mask, sqrtsNN)
+        out = model(cont, mask, event_feats)
+
         l_reg = evidential_loss(y, out["mu"], out["nu"], out["alpha"], out["beta"], coeff_reg=coeff_reg)
         l_cls = ce(out["logits"], z)
-        loss = l_reg + w_cls * l_cls
+        loss  = l_reg + w_cls * l_cls
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -111,10 +126,15 @@ def eval_split(model, loader, ce, device, coeff_reg, w_cls):
     model.eval()
     losses, maes = [], []
     for batch in loader:
-        cont = batch.cont.to(device); pdg_idx = batch.pdg_idx.to(device)
-        mask = batch.mask.to(device); sqrtsNN = batch.sqrtsNN.to(device)
-        y = batch.b.to(device); z = batch.centrality_bin.to(device)
-        out = model(cont, pdg_idx, mask, sqrtsNN)
+        cont    = batch.cont.to(device)
+        mask    = batch.mask.to(device)
+        sqrtsNN = batch.sqrtsNN.to(device)
+        y       = batch.b.to(device)
+        z       = batch.centrality_bin.to(device)
+
+        event_feats = _build_event_feats(cont, mask, sqrtsNN)
+        out = model(cont, mask, event_feats)
+
         l_reg = evidential_loss(y, out["mu"], out["nu"], out["alpha"], out["beta"], coeff_reg=coeff_reg)
         l_cls = ce(out["logits"], z)
         losses.append(float(l_reg + w_cls * l_cls))
@@ -122,9 +142,31 @@ def eval_split(model, loader, ce, device, coeff_reg, w_cls):
     return float(np.mean(losses)), float(np.mean(maes))
 
 
+def _build_event_feats(cont: torch.Tensor, mask: torch.Tensor, sqrtsNN: torch.Tensor) -> torch.Tensor:
+    """Build the 4-vector event_feats = (sqrtsNN, mult_lab, mean_pT_lab, total_pT_lab).
+
+    Args:
+        cont:    (B, L, 4) — per-particle (pT, eta_lab, phi, charge)
+        mask:    (B, L)    — True for real particles
+        sqrtsNN: (B,)      — collision energy
+
+    Returns:
+        (B, 4) float tensor on the same device as cont
+    """
+    mask_f   = mask.float()                              # (B, L)
+    pT       = cont[..., 0]                              # (B, L)
+    n_real   = mask_f.sum(dim=1).clamp(min=1.0)          # (B,)
+    total_pT = (pT * mask_f).sum(dim=1)                  # (B,)
+    mean_pT  = total_pT / n_real                         # (B,)
+    mult     = n_real                                    # (B,)
+
+    return torch.stack([sqrtsNN, mult, mean_pT, total_pT], dim=-1)  # (B, 4)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--arch", required=True, choices=["deepsets", "settransformer"])
+    p.add_argument("--arch", required=True,
+                   choices=["deepsets", "settransformer", "efn", "pfn", "gnn"])
     p.add_argument("--cache", required=True, type=Path,
                    help="Path to the pre-padded cache built by build_padded_cache.py")
     p.add_argument("--inputs", required=True, nargs="+", type=Path,
@@ -139,6 +181,8 @@ def main() -> None:
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--n-centrality-bins", type=int, default=9)
+    p.add_argument("--truth-dir", default="data/processed/truth", type=Path,
+                   help="Directory containing run_truth.py output files for centrality_bin labels")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--num-threads", type=int, default=4,
                    help="Cap on intra-op thread count (set OMP/MKL/etc.). Already applied at module load.")
@@ -149,7 +193,7 @@ def main() -> None:
     device = pick_device(args.device)
     print(f"arch: {args.arch}  device: {device}  threads: {args.num_threads}")
 
-    ds = CachedParticleDataset(args.cache.expanduser())
+    ds = CachedParticleDataset(args.cache.expanduser(), truth_dir=args.truth_dir)
     n_events = len(ds)
     energy_sizes = ds.energy_sizes
     print(f"Cached dataset: {n_events:,} events across {len(energy_sizes)} energies ({energy_sizes})")
@@ -169,7 +213,7 @@ def main() -> None:
     print(f"model: {n_params:,} parameters")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    ce = nn.CrossEntropyLoss()
+    ce  = nn.CrossEntropyLoss()
 
     ckpt_path = Path("checkpoints") / f"{args.arch}_{args.output_tag}" / "best.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,8 +251,8 @@ def main() -> None:
 
     cum = np.cumsum([0] + list(energy_sizes))
     is_train = np.zeros(n_events, dtype=bool); is_train[splits["train"]] = True
-    is_val = np.zeros(n_events, dtype=bool); is_val[splits["val"]] = True
-    is_test = np.zeros(n_events, dtype=bool); is_test[splits["test"]] = True
+    is_val   = np.zeros(n_events, dtype=bool); is_val[splits["val"]]     = True
+    is_test  = np.zeros(n_events, dtype=bool); is_test[splits["test"]]   = True
 
     out_root = Path("data/processed") / args.arch / args.output_tag
     out_root.mkdir(parents=True, exist_ok=True)
@@ -220,46 +264,52 @@ def main() -> None:
     mus, nus, alphas, betas, logits_all, b_true = [], [], [], [], [], []
     with torch.no_grad():
         for batch in dl_full:
-            cont = batch.cont.to(device); pdg_idx = batch.pdg_idx.to(device)
-            mask = batch.mask.to(device); sqrtsNN = batch.sqrtsNN.to(device)
-            out = model(cont, pdg_idx, mask, sqrtsNN)
-            mus.append(out["mu"].cpu().numpy()); nus.append(out["nu"].cpu().numpy())
-            alphas.append(out["alpha"].cpu().numpy()); betas.append(out["beta"].cpu().numpy())
+            cont    = batch.cont.to(device)
+            mask    = batch.mask.to(device)
+            sqrtsNN = batch.sqrtsNN.to(device)
+            event_feats = _build_event_feats(cont, mask, sqrtsNN)
+            out = model(cont, mask, event_feats)
+            mus.append(out["mu"].cpu().numpy())
+            nus.append(out["nu"].cpu().numpy())
+            alphas.append(out["alpha"].cpu().numpy())
+            betas.append(out["beta"].cpu().numpy())
             logits_all.append(out["logits"].cpu().numpy())
             b_true.append(batch.b.numpy())
-    mu = np.concatenate(mus); nu = np.concatenate(nus)
-    alpha = np.concatenate(alphas); beta = np.concatenate(betas)
-    logits = np.concatenate(logits_all); b_true_np = np.concatenate(b_true)
+
+    mu      = np.concatenate(mus);     nu     = np.concatenate(nus)
+    alpha   = np.concatenate(alphas);  beta   = np.concatenate(betas)
+    logits  = np.concatenate(logits_all)
+    b_true_np = np.concatenate(b_true)
     moments = nig_to_moments(torch.from_numpy(mu), torch.from_numpy(nu),
                              torch.from_numpy(alpha), torch.from_numpy(beta))
 
     print()
     for e_idx, in_path in enumerate(args.inputs):
-        lo, hi = int(cum[e_idx]), int(cum[e_idx + 1])
+        lo, hi   = int(cum[e_idx]), int(cum[e_idx + 1])
         out_path = out_root / f"{args.arch}_pred_{in_path.stem}.h5"
         with h5py.File(out_path, "w") as h:
-            h.create_dataset("b_pred", data=mu[lo:hi].astype(np.float32))
-            h.create_dataset("nu", data=nu[lo:hi].astype(np.float32))
-            h.create_dataset("alpha", data=alpha[lo:hi].astype(np.float32))
-            h.create_dataset("beta", data=beta[lo:hi].astype(np.float32))
-            h.create_dataset("total_var", data=moments["total_var"][lo:hi].numpy().astype(np.float32))
-            h.create_dataset("aleatoric_var", data=moments["aleatoric_var"][lo:hi].numpy().astype(np.float32))
-            h.create_dataset("epistemic_var", data=moments["epistemic_var"][lo:hi].numpy().astype(np.float32))
+            h.create_dataset("b_pred",         data=mu[lo:hi].astype(np.float32))
+            h.create_dataset("nu",             data=nu[lo:hi].astype(np.float32))
+            h.create_dataset("alpha",          data=alpha[lo:hi].astype(np.float32))
+            h.create_dataset("beta",           data=beta[lo:hi].astype(np.float32))
+            h.create_dataset("total_var",      data=moments["total_var"][lo:hi].numpy().astype(np.float32))
+            h.create_dataset("aleatoric_var",  data=moments["aleatoric_var"][lo:hi].numpy().astype(np.float32))
+            h.create_dataset("epistemic_var",  data=moments["epistemic_var"][lo:hi].numpy().astype(np.float32))
             h.create_dataset("centrality_bin", data=np.argmax(logits[lo:hi], axis=1).astype(np.int16))
-            h.create_dataset("logits", data=logits[lo:hi].astype(np.float32))
-            h.create_dataset("is_train", data=is_train[lo:hi])
-            h.create_dataset("is_val", data=is_val[lo:hi])
-            h.create_dataset("is_test", data=is_test[lo:hi])
-            h.attrs["n_events"] = hi - lo
-            h.attrs["source_h5"] = str(in_path)
+            h.create_dataset("logits",         data=logits[lo:hi].astype(np.float32))
+            h.create_dataset("is_train",       data=is_train[lo:hi])
+            h.create_dataset("is_val",         data=is_val[lo:hi])
+            h.create_dataset("is_test",        data=is_test[lo:hi])
+            h.attrs["n_events"]   = hi - lo
+            h.attrs["source_h5"]  = str(in_path)
             h.attrs["checkpoint"] = str(ckpt_path)
-            h.attrs["arch"] = args.arch
+            h.attrs["arch"]       = args.arch
         mae_test = float(np.abs(mu[lo:hi][is_test[lo:hi]] - b_true_np[lo:hi][is_test[lo:hi]]).mean())
         print(f"  energy {e_idx}: test b-MAE = {mae_test:.3f} fm  (N_test = {int(is_test[lo:hi].sum()):,})")
 
     with open(out_root / "train_metrics.json", "w") as f:
         json.dump({"args": vars(args) | {"inputs": [str(p) for p in args.inputs],
-                                          "cache": str(args.cache)},
+                                          "cache":  str(args.cache)},
                    "metrics": {"history": history, "best_val_loss": best_val,
                                "elapsed_sec": elapsed, "n_parameters": n_params}},
                   f, indent=2, default=str)
