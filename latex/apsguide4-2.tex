@@ -1,0 +1,195 @@
+%% ****** Start of file apsguide4-2.tex ****** %
+%%
+%%   This file is part of the APS files in the REVTeX 4.2 distribution.
+%%   Version 4.2b of REVTeX, December 2018.
+%%
+%%   Copyright (c) 2019 The American Physical Society.
+%%
+%%   See the REVTeX 4.2 README file for restrictions and more information.
+%%
+\documentclass[twocolumn,secnumarabic,amssymb, nobibnotes, aps, prd]{revtex4-2}
+%\usepackage{acrofont}%NOTE: Comment out this line for the release version!
+\newcommand{\revtex}{REV\TeX\ }
+\newcommand{\classoption}[1]{\texttt{#1}}
+\newcommand{\macro}[1]{\texttt{\textbackslash#1}}
+\newcommand{\m}[1]{\macro{#1}}
+\newcommand{\env}[1]{\texttt{#1}}
+\setlength{\textheight}{9.5in}
+
+\begin{document}
+
+\title{APS Author Guide for \revtex~4.2}%
+
+\author{American Physical Society}%
+\email[REVTeX Support: ]{revtex@aps.org}
+\affiliation{1 Research Road, Ridge, NY 11961}
+\date{December 2018}%
+\maketitle
+\tableofcontents
+
+\section{Introduction}
+Articles published in American Physical Society journals are converted to 
+an XML file during final journal production. Other formats such
+as PDF are derived directly from the XML, which constitutes the version of record. 
+Even before journal production, the APS editorial process can make use
+of the information in a properly prepared manuscript. Information such
+as title, authors, affiliations, etc., can be automatically
+extracted and used to populate our manuscript database. References can
+also be culled, cross-checked for accuracy, and used to create a
+linked version for referees and editors. Moreover, time can be saved
+as referrals can be made electronically rather than by conventional
+mail. Thus, a well-prepared electronic manuscript can enhance the
+entire peer review process from author to reader while making the
+whole process less expensive. To this end, authors should follow the
+guidelines in this document when preparing their submissions to \textit{Physical Review Letters},
+ \textit{Reviews of Modern Physics},  \textit{Physical Review A-E, Physical Review X, Physical Review Applied. Physical Review Fluids, Physical Review Materials, Physical Review Accelerators and Beams,} and \textit{Physical Review Physics Education Research}.
+ 
+Updated versions of this document will be made available at  \url{https://journals.aps.org/revtex/}. For more complete
+descriptions of how to use the \revtex\ 4.2 macros, please see the
+\textit{\revtex~4.2 Author's Guide} included with the \revtex~4.2
+distribution. Questions about \revtex\ 4.2 and using it to submit to APS journals may be
+emailed to \texttt{revtex@aps.org}.
+
+\section{Formatting}
+\subsection{Preprint, reprint, and twocolumn options}
+\revtex~4.2 offers a \classoption{reprint} class option to typeset a manuscript
+in a format that is a close approximation to the actual journal's appearance. It should
+be emphasized that this is only an \textit{approximation}; a manuscript may be substantially different
+in length or appearance after it goes through our production process. This is mostly due to the choice
+of fonts and the scaling of figures.
+
+\revtex\ 4.2 is designed to
+make it straightforward to switch between two-column and single-column
+formatting just by changing the class option. Authors may submit with
+either the \classoption{reprint} or the \classoption{twocolumn} class options.
+The \classoption{preprint} primarily does three things: It increases
+the font size to 12pt, increases the line spacing, and changes the
+formatting to single column.
+
+\subsection{Paper size}
+Manuscripts should be submitted to APS formatted for letter size
+paper. Papers are sent electronically to referees who may
+want to print them out. Letter size formatting ensures that this will
+be trouble free for all referees.
+
+\section{Marking up front matter}
+Perhaps the most important macros are those 
+pertaining to the markup of the front matter (title, authors,
+affiliations, abstract, etc.). Note that proper
+use of the \revtex\ 4.2 macros means that explicit centering environments
+in the front matter are not needed and should not be used.
+
+\subsection{Title}
+The title of the manuscript should be specified using the \m{title} macro. A
+double backslash {\textbackslash\textbackslash} may be used to force a line break in a long
+title.
+
+\subsection{Authors, affiliations, and collaborations}
+\label{sec:authors}
+\revtex\ 4.2 makes it straightforward to input author names and link them up properly with affiliations. Authors should let \revtex\ 4.2 do the work of grouping authors and affiliations and, if using the superscript style, numbering affiliations. Please follow these guidelines:
+\begin{itemize}
+\item Use a single \m{author} macro for each author's name. \revtex\ 4.2 automatically puts in all commas and the word `and.'
+\item Use the \m{surname} macro to explicitly indicate if an author's family name consists of more than one name or if the family name is not the author's last name.
+\item The \m{email} macro may be used to specify an author's e-mail
+address. The \m{thanks} macro must not be used for this. Only the
+e-mail address itself may appear in the macro's required argument.
+\item The \m{homepage} macro may be used to specify a URL associated
+with an author. The \m{thanks} macro must not be used for this. Only the
+URL may appear in the macro's required argument.
+\item The \m{altaffiliation} macro may be used to specify an alternate
+affiliation or temporary address for an author. The \m{thanks} macro
+must not be used for this. Only the affiliation
+may appear in the macro's required argument.
+\item The \m{thanks} macro may be used only if one of the more
+specific macros list above does not apply.
+\item Use a single \m{affiliation} for each affiliation.
+\item Superscripts linking authors to affiliations must be
+accomplished using the \classoption{superscriptaddress} class option
+rather than putting in explicit superscripts by hand.
+\item A collaboration may be specified by using the \m{collaboration}
+macro. The \m{author} macro must not be used for collaborations.
+\end{itemize}
+\subsection{Abstract}
+The abstract must be specified using the \env{abstract}
+environment. Note that in \revtex\ 4.2, the abstract must come before
+the \m{maketitle} command. \revtex\ 4.2 now allows the the use of the \env{description}
+environment within the abstract to provide \textit{structured abstracts}. For instance, \textit{Physical Review C} would like authors to provide abstracts with sections summarizing the paper's  \textbf{Background}, \textbf{Purpose}, \textbf{Method}, \textbf{Results}, and \textbf{Conclusions}. This can be accomplished in the following manner:
+\begin{verbatim}
+\begin{abstract}
+\begin{description}
+\item[Background] This part would describe the
+context needed to understand what the paper
+is about.
+\item[Purpose] This part would state the purpose
+of the present paper.
+\item[Method] This part describe the methods
+used in the paper.
+\item[Results] This part would summarize the
+results.
+\item[Conclusions] This part would state the
+conclusions of the paper.
+\end{description}
+\end{abstract}
+\end{verbatim}
+
+\section{References and footnotes}
+Authors are strongly encouraged
+to use Bib\TeX\ when preparing their bibliographies.  If Bib\TeX\ is used, current production processes
+require that the \texttt{.bbl} file be included directly into the
+manuscript's main \texttt{.tex} file. \revtex\ 4.2 comes with two Bib\TeX\ style files for formatting
+references, one for the \textit{Physical Review} journals and one 
+for \textit{Review of Modern Physics}. In 4.2, the Bib\TeX\ styles have been modified to display journal article titles in the bibliography.
+
+The following apply whether
+Bib\TeX\ is used or not.  
+\begin{itemize}
+\item Authors should use the \m{cite} and \m{bibitem} commands to create
+bibliographies and to refer to items in the bibliography. ``By hand"
+numbering of references should be avoided.
+\item \revtex~4.2 provides new syntax for combining multiple citations into a single entry in the bibliography and for putting extra text before and after a reference. Please refer to \textit{\revtex~4.2 Author's Guide} included with the \revtex~4.2 distribution for full details.
+\item Footnotes must be specified using the \m{footnote}
+macro. \revtex\ 4.2 will place the footnotes in
+the bibliography for the \textit{Physical Review}
+journals. Please note that even if you don't use Bib\TeX, you may have to run Bib\TeX\ to get the footnotes to appear. Footnotes giving additional information about authors (such
+as e-mail addresses) must not be specified using the \m{footnote}
+macro (see Section~\ref{sec:authors}).
+\item Avoid custom footnotes using \m{footnotemark} and \m{footnotetext} [except in the context of tables (see
+Section~\ref{sec:tablenotes})].
+\item References should be formatted and specified according to the
+\textit{Physical Review Style Guide}. Note that using Bib\TeX\ automatically ensures this.
+\item URLs should be specified using the \m{url} macro. Bib\TeX\ will automatically take
+care of this if the \texttt{url} field is used.
+\item E-print identifiers should be included using the \m{eprint} macro. Bib\TeX\ will automatically take care of this if the \texttt{eprint} field is used.
+\end{itemize}
+
+Please see the \revtex~4.2 Author's Guide for new features in \revtex~4.2's APS Bib\TeX\ styles, including support for citing data sets, journals that use DOIs in place of page numbers, and journals that use year and issue instead of volume to uniquely identify articles.
+
+\section{Body of the paper}
+\subsection{Sectioning and cross-referencing}
+For sectioning a manuscript, the basic rule is to use the appropriate
+sectioning commands (\m{section}, \m{subsection}, \m{subsubsection},
+\textit{etc.}). Cross-referencing a section must be done by using the
+proper \m{label} and \m{ref} commands. Cross-referencing by hand is
+not allowed. \m{part}, \m{chapter}, and \m{subparagraph} should not be
+used.
+
+\subsection{Appendices}
+Appendices should be specified using the \m{appendix} command which
+specifies that all following sections create with the \m{section}
+commands are appendices. If there is only one appendix, then the
+\m{appendix*} command should be used instead.
+
+\subsection{Acknowledgments}
+Any acknowledgments should be included by using the
+\env{acknowledgments} environment. Note that in \revtex~4.2, this is
+an environment and not a command.
+
+\section{Figures}
+\subsection{Figure inclusions}
+
+\section{Author-defined macros}
+
+\section{Summary}
+
+\end{document}
+

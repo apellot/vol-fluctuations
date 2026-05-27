@@ -1,22 +1,20 @@
-"""Graph Neural Network for centrality estimation.
+"""Graph Neural Network for centrality estimation (PyTorch Geometric).
 
-Connects each particle to its k nearest neighbours in (eta_lab, phi) space
-using edge convolutions (Wang et al., SIGGRAPH 2019 — EdgeConv / DGCNN).
-At low multiplicity (~5-10 particles in FXT), the graph is very small so
-this is fast and captures pairwise correlations (e.g. back-to-back proton
-pairs) that pure pooling architectures miss.
+Uses EdgeConv / DGCNN (Wang et al., SIGGRAPH 2019) with a kNN graph built in
+(eta_lab, phi) space.  The padded dense input (B, L, C) + mask is stripped to
+PyG's flat node representation internally; the forward signature is unchanged
+so the training loop requires no modifications.
+
+torch_cluster is not required.  knn_graph is implemented in pure PyTorch
+(pairwise distance per mini-graph; cheap for FXT multiplicities of 5-10).
 
 Pipeline:
-    cont (B, L, 4) = pT, eta_lab, phi, charge    mask (B, L)    event_feats (B, F_e)
-        → build kNN graph in (eta_lab, phi)       → edge index (B, L, k)
-        → EdgeConv layer(s): aggregate (x_i || x_j - x_i) over neighbours → (B, L, H)
-        → masked mean pool                        → (B, H)
-        → concat event_feats                      → (B, H + F_e)
-        → event-level MLP                         → (B, rho_hidden)
-        → NIG head + softmax head
-
-kNN is computed on the CPU in O(L^2) — totally fine for L <= 512 and typical
-FXT multiplicities of 5-10 real particles (padded positions are masked out).
+    cont (B, L, 4)  mask (B, L)  event_feats (B, F_e)
+        -> strip padding -> x (N_real, 4),  batch_idx (N_real,)
+        -> _knn_graph(pos=[eta,phi], k, batch_idx) -> edge_index (2, E)
+        -> stacked EdgeConv blocks with residual -> h (N_real, H)
+        -> global_mean_pool -> (B, H)
+        -> concat event_feats -> rho MLP -> NIG + softmax heads
 """
 from __future__ import annotations
 
@@ -25,108 +23,76 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp, masked_mean
+from torch_geometric.nn import EdgeConv, global_mean_pool
+
+from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp
 
 
 @dataclass
 class GNNConfig:
     n_centrality_bins: int
-    k: int = 4                   # neighbours per particle (clipped to actual multiplicity)
-    edge_hidden: int = 128       # width of the EdgeConv MLP
-    edge_depth: int = 2          # depth of the EdgeConv MLP
-    n_edge_layers: int = 2       # number of stacked EdgeConv blocks
-    rho_hidden: int = 128        # event-level MLP width
+    k: int = 4
+    edge_hidden: int = 50
+    edge_depth: int = 2
+    n_edge_layers: int = 2
+    rho_hidden: int = 50
     rho_depth: int = 2
     dropout: float = 0.1
 
 
-def _knn_graph(pos: Tensor, k: int, mask: Tensor) -> Tensor:
-    """Build kNN graph indices in (eta, phi) space.
+def _knn_graph(pos: Tensor, k: int, batch_idx: Tensor) -> Tensor:
+    """Build a kNN graph in COO format without torch_cluster.
+
+    For each node i, finds k nearest neighbours j (by Euclidean distance in
+    pos-space, within the same batch element) and emits directed edges j->i
+    (source-to-target convention matching PyG's EdgeConv default).
 
     Args:
-        pos:  (B, L, 2) — (eta_lab, phi) coordinates
-        k:    number of neighbours to find (will be clipped to real particle count)
-        mask: (B, L) bool — True for real particles
+        pos:       (N_real, D) coordinates used for distance computation
+        k:         number of neighbours per node
+        batch_idx: (N_real,) long — batch membership of each node
 
     Returns:
-        idx: (B, L, k) long — neighbour indices; padded particles point to 0
+        edge_index: (2, E) long — row 0 = source, row 1 = target
     """
-    B, L, _ = pos.shape
-    # Pairwise squared distances, shape (B, L, L).
-    diff = pos.unsqueeze(2) - pos.unsqueeze(1)   # (B, L, L, 2)
-    dist2 = (diff ** 2).sum(-1)                  # (B, L, L)
+    device = pos.device
+    src_list: list[Tensor] = []
+    dst_list: list[Tensor] = []
 
-    # Mask out padded positions so they never become neighbours.
-    # Set their distance to a large value.
-    INF = 1e9
-    mask_f = mask.float()                        # (B, L)
-    not_real = (1.0 - mask_f).unsqueeze(1)       # (B, 1, L)  — cols = candidates
-    dist2 = dist2 + not_real * INF
+    for b in batch_idx.unique():
+        global_idx = (batch_idx == b).nonzero(as_tuple=True)[0]  # (n_b,)
+        p = pos[global_idx]                                        # (n_b, D)
+        n_b = p.shape[0]
+        k_eff = min(k, n_b - 1)
+        if k_eff <= 0:
+            continue
 
-    # Also mask out self-loops.
-    eye = torch.eye(L, device=pos.device, dtype=torch.bool).unsqueeze(0)
-    dist2 = dist2.masked_fill(eye, INF)
+        diff = p.unsqueeze(0) - p.unsqueeze(1)                    # (n_b, n_b, D)
+        dist2 = (diff ** 2).sum(-1)                                # (n_b, n_b)
+        dist2.fill_diagonal_(float("inf"))
 
-    # Clip k to the actual number of real neighbours available.
-    n_real = mask.long().sum(dim=1)              # (B,)
-    k_eff = max(1, min(k, int(n_real.min().item()) - 1))
-    k_eff = max(k_eff, 1)
+        # nn_idx[i, :] = local indices of k nearest neighbours of node i
+        _, nn_idx = dist2.topk(k_eff, dim=1, largest=False)       # (n_b, k_eff)
 
-    # (B, L, k_eff) — indices of nearest neighbours.
-    _, idx = dist2.topk(k_eff, dim=-1, largest=False, sorted=False)
-    return idx                                   # (B, L, k_eff)
+        targets_local = (
+            torch.arange(n_b, device=device)
+            .unsqueeze(1).expand(n_b, k_eff).reshape(-1)
+        )
+        sources_local = nn_idx.reshape(-1)
+
+        src_list.append(global_idx[sources_local])
+        dst_list.append(global_idx[targets_local])
+
+    if not src_list:
+        return torch.zeros(2, 0, dtype=torch.long, device=device)
+
+    return torch.stack([torch.cat(src_list), torch.cat(dst_list)], dim=0)
 
 
-class EdgeConv(nn.Module):
-    """Single EdgeConv block.
-
-    For each particle i, aggregates messages from its k neighbours j:
-        m_ij = MLP(x_i || x_j - x_i)
-    Then max-pools over j to get the new representation of i.
-    """
-
-    def __init__(self, in_dim: int, hidden: int, depth: int, dropout: float) -> None:
-        super().__init__()
-        # Input to the edge MLP: (x_i, x_j - x_i) → 2 * in_dim
-        self.mlp = make_mlp(2 * in_dim, hidden, depth, dropout)
-        self.out_proj = nn.Linear(hidden, hidden)
-
-    def forward(self, x: Tensor, idx: Tensor, mask: Tensor) -> Tensor:
-        """
-        Args:
-            x:    (B, L, C) particle features
-            idx:  (B, L, k) neighbour indices
-            mask: (B, L)    bool, True = real particle
-
-        Returns:
-            (B, L, hidden)
-        """
-        B, L, C = x.shape
-        k = idx.shape[-1]
-
-        # Gather neighbour features: (B, L, k, C)
-        idx_exp = idx.unsqueeze(-1).expand(B, L, k, C)
-        x_exp = x.unsqueeze(2).expand(B, L, L, C)
-        # We need to gather along dim=2 (the L dimension of candidates).
-        x_j = torch.gather(x.unsqueeze(2).expand(B, L, L, C),
-                           2,
-                           idx.unsqueeze(-1).expand(B, L, k, C))  # (B, L, k, C)
-
-        x_i = x.unsqueeze(2).expand(B, L, k, C)                  # (B, L, k, C)
-        edge_feat = torch.cat([x_i, x_j - x_i], dim=-1)          # (B, L, k, 2C)
-
-        # Apply MLP to each edge independently.
-        edge_feat = edge_feat.view(B * L * k, 2 * C)
-        h = self.mlp(edge_feat)                                    # (B*L*k, hidden)
-        h = h.view(B, L, k, -1)                                   # (B, L, k, hidden)
-
-        # Max-pool over neighbours.
-        h, _ = h.max(dim=2)                                       # (B, L, hidden)
-        h = self.out_proj(h)
-
-        # Zero out padded positions.
-        h = h * mask.unsqueeze(-1).float()
-        return h
+def _edge_mlp(in_dim: int, hidden: int, depth: int, dropout: float) -> nn.Sequential:
+    """MLP for EdgeConv: input is (x_i || x_j - x_i), so 2*in_dim."""
+    trunk = make_mlp(2 * in_dim, hidden, depth, dropout)
+    return nn.Sequential(*trunk, nn.Linear(hidden, hidden))
 
 
 class GNN(nn.Module):
@@ -134,36 +100,45 @@ class GNN(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # Input projection: map raw particle features to edge_hidden dim.
         self.input_proj = nn.Linear(N_CONT_FEATURES, cfg.edge_hidden)
 
-        # Stack of EdgeConv blocks (residual connections after the first).
         self.edge_convs = nn.ModuleList([
-            EdgeConv(cfg.edge_hidden, cfg.edge_hidden, cfg.edge_depth, cfg.dropout)
+            EdgeConv(
+                nn=_edge_mlp(cfg.edge_hidden, cfg.edge_hidden, cfg.edge_depth, cfg.dropout),
+                aggr="max",
+            )
             for _ in range(cfg.n_edge_layers)
         ])
 
-        # Event-level MLP after pooling.
         rho_in = cfg.edge_hidden + N_EVENT_FEATURES
         self.rho = make_mlp(rho_in, cfg.rho_hidden, cfg.rho_depth, cfg.dropout)
         self.heads = OutputHeads(cfg.rho_hidden, cfg.n_centrality_bins)
 
     def forward(self, cont: Tensor, mask: Tensor, event_feats: Tensor) -> dict[str, Tensor]:
-        # Build kNN graph from (eta_lab, phi) — features at indices 1 and 2.
-        pos = cont[..., 1:3]                          # (B, L, 2)
-        idx = _knn_graph(pos, self.cfg.k, mask)       # (B, L, k)
+        B, L, _ = cont.shape
 
-        # Project raw features into the hidden space.
-        h = self.input_proj(cont)                     # (B, L, edge_hidden)
-        h = h * mask.unsqueeze(-1).float()
+        # Strip padding: convert (B, L, C) + mask to flat PyG node format.
+        x = cont[mask]                                             # (N_real, 4)
+        batch_idx = (
+            torch.arange(B, device=cont.device)
+            .unsqueeze(1).expand(B, L)[mask]
+        )                                                          # (N_real,)
 
-        # Apply stacked EdgeConv blocks with residual connections.
+        # Project raw particle features to the hidden dimension.
+        h = self.input_proj(x)                                     # (N_real, H)
+
+        # Build kNN graph in (eta_lab, phi) space (features 1 and 2).
+        pos = x[:, 1:3]
+        edge_index = _knn_graph(pos.detach(), k=self.cfg.k, batch_idx=batch_idx)
+
+        # Stacked EdgeConv blocks; residual connections from the second layer on.
         for i, conv in enumerate(self.edge_convs):
-            h_new = conv(h, idx, mask)
-            h = h + h_new if i > 0 else h_new        # residual after first layer
+            h_new = conv(h, edge_index)
+            h = h + h_new if i > 0 else h_new
 
-        # Global masked mean pool.
-        pooled = masked_mean(h, mask)                 # (B, edge_hidden)
+        # Pool to one vector per event.  size=B ensures shape (B, H) even when
+        # the last event(s) in the batch have zero real particles.
+        pooled = global_mean_pool(h, batch_idx, size=B)            # (B, H)
 
         # Concat event-level scalars and run event MLP.
         merged = torch.cat([pooled, event_feats], dim=-1)

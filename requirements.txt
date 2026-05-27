@@ -8,6 +8,7 @@ uproot  # ROOT TTree reader — SMASH output is ROOT, no pyROOT needed
 
 # ML
 torch
+torch-geometric
 lightning
 scikit-learn
 

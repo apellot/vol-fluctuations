@@ -36,8 +36,8 @@ class SetTransformerConfig:
     n_heads: int = 4
     n_sab: int = 2
     n_pma_seeds: int = 1
-    ff_hidden: int = 192
-    rho_hidden: int = 128
+    ff_hidden: int = 50
+    rho_hidden: int = 50
     rho_depth: int = 2
     dropout: float = 0.1
 

@@ -26,9 +26,9 @@ from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp, mas
 @dataclass
 class DeepSetsConfig:
     n_centrality_bins: int
-    phi_hidden: int = 128
+    phi_hidden: int = 50
     phi_depth: int = 2
-    rho_hidden: int = 128
+    rho_hidden: int = 50
     rho_depth: int = 2
     dropout: float = 0.1
 
