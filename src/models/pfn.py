@@ -30,7 +30,7 @@ from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp
 
 @dataclass
 class PFNConfig:
-    n_centrality_bins: int
+    n_centrality_bins: int | None = None  # ignored (no classifier); kept for back-compat
     latent: int = 96
     phi_depth: int = 2
     phi_hidden: int = 96

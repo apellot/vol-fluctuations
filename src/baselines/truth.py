@@ -106,20 +106,49 @@ def fit(mult_train: np.ndarray, b_train: np.ndarray,
 def assign_bins(mult: np.ndarray, mult_thresholds: np.ndarray) -> np.ndarray:
     """Vectorized assignment of multiplicity values to centrality bin indices.
 
-    Bin 0 is the most central (largest mult); bin n_bins-1 is the least central
-    inside the calibrated range. Events with multiplicity below the last
-    threshold (more peripheral than 80 %) are assigned bin n_bins-1 with a flag
-    in the caller's interpretation — we do not introduce a separate "out of
-    range" bin because peripheral classification beyond 80 % is not in scope.
+    Bin 0 is the most central (largest mult). `mult_thresholds` are the lower
+    multiplicity edges of bins 0..n_bins-1, in DESCENDING order — the i-th entry
+    is the boundary below which an event drops out of bin i-1 into bin i. Events
+    more peripheral than the last threshold (beyond the 80 % edge) are returned
+    as -1 (out of the 0–80 % centrality scope) rather than being folded into the
+    last bin — callers must treat -1 as "unclassified" (CrossEntropyLoss should
+    use ignore_index=-1; per-bin loops over range(n_bins) skip them naturally).
+
+    Fix (2026-05-28): the previous `searchsorted(...) - 1` then clip merged the
+    most-central stratum into bin 0, so e.g. "0–5 %" actually held the top 10 %
+    and every percentile label was shifted. searchsorted(side="left") without the
+    -1 maps each event to the correct class; mult ≥ a threshold stays in the more
+    central bin.
     """
     n_bins = len(mult_thresholds)
-    # np.searchsorted on a DESCENDING array: invert sign to make it ascending.
-    # mult_thresholds is descending, so -mult_thresholds is ascending.
-    asc = -mult_thresholds
-    idx = np.searchsorted(asc, -mult, side="right") - 1
-    # Clip to valid range. Events with mult above the top threshold land in bin 0;
-    # events with mult below all thresholds (more peripheral than 80 %) land in n_bins-1.
-    return np.clip(idx, 0, n_bins - 1).astype(np.int16)
+    # mult_thresholds is descending, so -mult_thresholds is ascending for searchsorted.
+    asc = -np.asarray(mult_thresholds)
+    idx = np.searchsorted(asc, -np.asarray(mult), side="left")  # 0..n_bins
+    # idx == n_bins means more peripheral than the last (80 %) threshold → out of scope.
+    return np.where(idx >= n_bins, -1, idx).astype(np.int16)
+
+
+def centrality_from_values(
+    values: np.ndarray,
+    bin_edges: np.ndarray = DEFAULT_BIN_EDGES,
+    higher_is_central: bool = True,
+) -> np.ndarray:
+    """Percentile centrality classes from any monotonic estimator (no calibration).
+
+    Generalises the multiplicity binning to any centrality variable, reusing the
+    fixed `assign_bins`. Set `higher_is_central=True` for variables where larger =
+    more central (Npart, multiplicity) and False for b (smaller = more central).
+
+    Used by the ML pipeline (predicted Npart), the cumulant oracle (true Npart),
+    and any b-based binning. Returns 0..n_bins-1 with -1 for events beyond the
+    last edge (out of the 0–80 % scope). Thresholds are derived from `values`
+    themselves (the population being binned).
+    """
+    v = np.asarray(values, dtype=np.float64)
+    signed = v if higher_is_central else -v
+    # Lower-mult edge of each class, descending — same convention as assign_bins.
+    thresholds = np.quantile(signed, 1.0 - np.asarray(bin_edges)[1:])
+    return assign_bins(signed, thresholds)
 
 
 def predict(mult: np.ndarray, calib: TruthCalibration) -> tuple[np.ndarray, np.ndarray]:
@@ -130,8 +159,13 @@ def predict(mult: np.ndarray, calib: TruthCalibration) -> tuple[np.ndarray, np.n
     uncertainty for RefMult is conventionally taken as the bin's std (calib.b_stds).
     """
     bins = assign_bins(mult, calib.mult_thresholds)
-    b_pred = calib.b_means[bins]
-    return bins, b_pred.astype(np.float32)
+    # Out-of-scope events (bins == -1, beyond the 80 % edge) get a NaN prediction
+    # rather than silently picking up b_means[-1] (the last bin) via negative
+    # indexing. In-scope events index b_means normally.
+    in_scope = bins >= 0
+    b_pred = np.full(bins.shape, np.nan, dtype=np.float32)
+    b_pred[in_scope] = calib.b_means[bins[in_scope]]
+    return bins, b_pred
 
 
 def train_test_split_indices(n: int, train_frac: float = 0.5, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:

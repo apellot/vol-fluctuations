@@ -7,13 +7,19 @@ achieve. The realistic STAR-style baseline (Glauber-tuned-to-RefMult) is in
 scripts/run_glauber.py.
 
 Reads from the padded cache (lab-frame, charged-only) built by
-build_padded_cache.py. Writes one prediction HDF5 per energy slice so the
-evaluator and ML training scripts can pull centrality_bin labels.
+build_padded_cache.py (SMASH) or build_padded_cache_urqmd.py (UrQMD). Writes
+one prediction HDF5 per energy slice so the evaluator and ML training scripts
+can pull centrality_bin labels.
 
 Usage:
     python scripts/run_truth.py \\
-        --cache data/processed/cached/all_lab_truth.h5 \\
-        --output-dir data/processed/truth_lab
+        --transport smash \\
+        [--cache      data/processed/cached/smash_padded_v2.h5] \\
+        [--output-dir data/processed/truth/smash]
+
+    # UrQMD variant — re-fits the percentile thresholds on the UrQMD multiplicity
+    # distribution; truth-tuned baseline is intrinsically per-transport.
+    python scripts/run_truth.py --transport urqmd
 """
 
 from __future__ import annotations
@@ -77,12 +83,35 @@ def process_energy_slice(mult: np.ndarray, b: np.ndarray, *, seed: int) -> dict:
     }
 
 
+# Detector-emulated caches are the headline study (2026-05-28 restructure);
+# UrQMD is the primary transport. Pass --transport smash for the secondary set.
+DEFAULT_CACHE = {
+    "smash": Path("data/processed/cached/smash_padded_v2_det.h5"),
+    "urqmd": Path("data/processed/cached/urqmd_padded_det.h5"),
+}
+DEFAULT_OUTPUT_DIR = {
+    "smash": Path("data/processed/truth/smash"),
+    "urqmd": Path("data/processed/truth/urqmd"),
+}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--cache", required=True, type=Path)
-    p.add_argument("--output-dir", required=True, type=Path)
+    p.add_argument("--transport", choices=["smash", "urqmd"], default="urqmd",
+                   help="Transport model whose multiplicity distribution is used to calibrate "
+                        "the percentile thresholds. Picks default --cache and --output-dir.")
+    p.add_argument("--cache", type=Path, default=None,
+                   help="Padded cache. Defaults to the canonical cache for the chosen --transport.")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="Output directory. Defaults to data/processed/truth/{transport}/.")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
+
+    if args.cache is None:
+        args.cache = DEFAULT_CACHE[args.transport]
+    if args.output_dir is None:
+        args.output_dir = DEFAULT_OUTPUT_DIR[args.transport]
+    print(f"transport={args.transport}  cache={args.cache}  output_dir={args.output_dir}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(args.cache, "r") as h:

@@ -9,8 +9,8 @@ visibly in the peripheral region where classical thresholds collapse.
 Usage:
     python scripts/compare_baselines.py \\
         --truth-inputs data/processed/auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --truth-preds  data/processed/truth/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --glauber-preds data/processed/glauber/glauber_pred_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --truth-preds  data/processed/truth/smash/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --glauber-preds data/processed/glauber/smash/glauber_pred_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --mlp-preds    data/processed/mlp/baseline_v1/mlp_pred_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --output-dir   figures/compare/baseline_v1
 """

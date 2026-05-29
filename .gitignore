@@ -41,3 +41,11 @@ env/
 .idea/
 .DS_Store
 *.swp
+
+# Local Claude Code agent definitions
+.claude/agents/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out

@@ -1,0 +1,600 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{tabularx}
+\usepackage{array}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=black,
+    citecolor=black
+}
+
+\title{A Beginner's Primer to the Four ML Architectures \\
+       for the FXT Centrality Paper}
+\author{Internal note for Mathias Labonté}
+\date{\today}
+
+\newcommand{\sqsnn}{\ensuremath{\sqrt{s_{NN}}}}
+\newcommand{\pT}{\ensuremath{p_{\text{T}}}}
+\newcommand{\etalab}{\ensuremath{\eta_{\text{lab}}}}
+
+\begin{document}
+\maketitle
+
+\section*{How to read this document}
+
+You know the physics already. This note is a friendly textbook-style
+introduction to the four neural-network architectures we plan to train
+for the FXT centrality paper. By the last page you should be able to
+sit at a group meeting, hear someone say ``we ran a DeepSets model
+against a Set Transformer with an evidential head,'' and translate that
+into something concrete. We assume you have never built a neural
+network. We do not assume you remember any ML jargon, and we will
+define each term once when it first appears.
+
+% =====================================================================
+\section{The ML basics, in two pages}
+
+\subsection{What ``training a neural network'' actually means}
+
+A neural network is a parameterized function $f_\theta(x)$. The vector
+$\theta$ is a list of numbers (the \emph{weights}, sometimes millions
+of them) that we are free to choose. The function takes some input $x$
+(in our case, features of a heavy-ion event) and returns a prediction
+(in our case, the impact parameter $b$ and the centrality percentile).
+
+The shape of $f_\theta$ is built out of two simple operations applied
+in alternation: a linear transformation $y = Wx + c$, and a fixed
+nonlinear ``activation'' applied element-wise (for example, ReLU,
+defined as $\max(0, z)$). Stack a few dozen of these layers and the
+overall function becomes flexible enough to approximate essentially
+any smooth mapping. Importantly, the network is just arithmetic --- no
+mystery, no hidden physics.
+
+\emph{Training} is the process of choosing $\theta$ so that the
+network's predictions match the truth on a set of events for which we
+know the answer. We measure the mismatch with a \emph{loss function}
+$L(\theta)$, for example the mean squared error
+$L = \langle (b_{\text{pred}} - b_{\text{true}})^2 \rangle$. Then we
+adjust $\theta$ in the direction that decreases $L$. The directional
+derivative $\partial L / \partial \theta$ is the \emph{gradient}, and
+the iterative recipe
+\[
+   \theta \leftarrow \theta - \eta \, \nabla_\theta L
+\]
+is \emph{gradient descent}. The number $\eta$ is the
+\emph{learning rate}, typically $10^{-3}$ to $10^{-4}$. In practice we
+average the gradient over a small batch of events (say 256) at a time;
+this is \emph{stochastic gradient descent} and is essentially the
+entire training algorithm.
+
+To avoid the model memorizing the training set, we split our 350k
+SMASH events into three disjoint pieces: \textbf{train} (80\,\%, used
+to update weights), \textbf{validation} (10\,\%, used to pick
+hyperparameters and decide when to stop), and \textbf{test} (10\,\%,
+touched exactly once, at the very end, to report performance). Mixing
+these up is the single most common methodological mistake in applied
+ML, and we go to lengths to prevent it.
+
+\subsection{Permutation invariance, in physics language}
+
+A heavy-ion event is fundamentally a \emph{set} of final-state
+particles. There is no first particle, second particle, third
+particle. If I reshuffle the list, the event is the same event. Any
+function we use to extract $b$ from the particle list had better have
+the same property:
+\[
+   f(p_1, p_2, \dots, p_N) = f(p_{\pi(1)}, p_{\pi(2)}, \dots, p_{\pi(N)})
+\]
+for any permutation $\pi$. This is \emph{permutation invariance}, and
+it is the central inductive bias in three of our four architectures.
+``Inductive bias'' just means a structural assumption baked into the
+model so it does not have to learn that assumption from data.
+
+A vanilla MLP (multi-layer perceptron) given a flat vector of particle
+4-momenta does \emph{not} have this property: swap particles 7 and 8,
+and the inputs to all downstream neurons change. Three of our four
+architectures fix this by construction. The fourth (the MLP baseline)
+sidesteps it by feeding only permutation-invariant \emph{summary}
+features (counts, means, sums).
+
+A useful analogy: computing the total charge of a system from a list
+of constituents is automatically permutation-invariant, because
+summation is. Computing the total $\pT$ is the same. So is the mean
+rapidity. These are all examples of the same universal recipe:
+particle-wise function, then symmetric pool, then a function of the
+pool. This is exactly the DeepSets template (Sec.~\ref{sec:deepsets}).
+
+\subsection{What the four models share}
+
+By design (see \texttt{project\_scope\_v2.md}, locked 2026-05-17), all
+four architectures see the same inputs. This is so that the only
+difference between them is the inductive bias, not the data.
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Per-particle features} (variable length, one row per
+      charged hadron passing $0 \le \etalab \le 1.5$\footnote{The
+      project scope memo records the wider window
+      $0<\etalab<2$; the current code uses $0\le\etalab\le 1.5$ per
+      STAR FXT TPC (Kimelman thesis); this discrepancy is to be
+      reconciled.}):
+      $\pT$, $\etalab$, $\phi$, charge.\footnote{Frame convention:
+      SMASH and UrQMD generate events in collider (CM) mode with two
+      opposing beams. For FXT-faithful analysis we Lorentz-boost into
+      the target-rest frame using $y_{\text{boost}} =
+      \mathrm{arccosh}(\sqsnn / 2 m_N)$ along the beam axis; $\etalab$
+      denotes pseudorapidity in that boosted frame and matches the
+      geometry STAR uses at fixed-target energies. The boost is
+      implemented in \texttt{scripts/build\_padded\_cache.py}. (Note:
+      a parallel CM-frame pipeline also exists in the codebase for
+      cross-checks; the primer's quoted numbers are lab-frame unless
+      stated otherwise.)}
+      No PDG, no mass --- we deliberately exclude particle ID at the
+      centrality stage, so the method does not depend on PID
+      performance. At $\sqsnn=3.5$\,GeV the most central $5\,\%$ of
+      events have a median of $\sim 150$ such tracks in this
+      acceptance (measured from
+      \texttt{data/processed/cached/all\_lab\_truth.h5}, top-5\,\% by
+      truth $b$, $0\le\etalab\le 1.5$); a peripheral event can have
+      zero.
+\item \textbf{Event-level features} (always four scalars per event):
+      $\sqsnn$, multiplicity in the acceptance window
+      ($\text{mult}_{\text{lab}}$), mean $\pT$, and total $\pT$.
+      $\sqsnn$ is what makes joint multi-energy training possible.
+\end{itemize}
+
+The MLP uses only the event-level features (plus a handful of derived
+summaries). The other three architectures see the full particle list
+\emph{and} the event-level features, the latter concatenated after the
+permutation-invariant pool.
+
+\subsection{What the four models output (the heads)}
+
+All four models share the same two output heads:
+
+\begin{enumerate}[leftmargin=*]
+\item An \textbf{evidential regression head} for $b$. Instead of
+      outputting a single number, it outputs four numbers
+      $(\mu, \nu, \alpha, \beta)$ that parameterize a
+      Normal-Inverse-Gamma (NIG) distribution. The practical
+      consequence is that every prediction comes with its own
+      uncertainty bar --- one number for the best-estimate
+      $b$ and another for ``how sure the model is.'' This is what
+      lets us draw a coverage plot later. (Caveat: a recent paper
+      [Amini-NIG ``mirage,'' arXiv:2510.18322] argues NIG uncertainty
+      can be miscalibrated; we will cross-check with deep ensembles
+      for the headline result.)
+\item A \textbf{centrality percentile head}. A softmax classifier over
+      10 or 20 bins (0--5\,\%, 5--10\,\%, $\dots$). The softmax
+      produces a probability for each bin, which we read either as a
+      hard prediction (\textit{argmax}) or as a soft distribution.
+\end{enumerate}
+
+The total loss is a weighted sum of the regression loss (NIG negative
+log-likelihood plus a regularizer) and the cross-entropy loss for the
+classifier. We train both heads jointly.
+
+\clearpage
+% =====================================================================
+\section{Architecture 1 -- MLP feature-vector baseline}
+\label{sec:mlp}
+
+\subsection{Input}
+
+A flat vector of $\sim$10--20 scalar event-level summary features:
+$\sqsnn$, charged multiplicity in $\etalab$ windows
+(several sub-windows: 0--0.5, 0--1, 0--1.5), mean $\pT$, total $\pT$, the
+ratio of forward to mid-rapidity multiplicity, the number of protons,
+the number of antiprotons, and a small handful of similar hand-built
+quantities. Crucially, \emph{no} particle-list input.
+
+\subsection{Core idea}
+
+The MLP --- multi-layer perceptron --- is the workhorse of plain-vanilla
+deep learning. It is a stack of dense layers:
+\[
+   h_{\ell+1} = \sigma(W_\ell h_\ell + c_\ell)
+\]
+where $\sigma$ is a nonlinearity (we use ReLU), $W_\ell$ is a weight
+matrix, $c_\ell$ a bias vector, and $h_\ell$ is the hidden
+representation at layer $\ell$. We use 2--4 layers, widths of
+128--512, and a small amount of \emph{dropout} (randomly zeroing 10\%
+of neurons during training) as a regularizer.
+
+There is no per-particle reasoning here at all. The model sees the
+same RefMult observable a Glauber-RefMult fit uses, plus several
+additional event-level summary scalars --- so strictly more
+information than a single-observable Glauber fit. The inductive bias
+is essentially zero --- we are just
+giving the model a nice flexible parametric form that can learn the
+mapping (summary numbers) $\to$ (b, percentile) better than a
+hand-tuned threshold.
+
+\subsection{Physicist analogy}
+
+This is the ML equivalent of polynomial regression on engineered
+features. If you have ever fit a yield versus centrality with a
+cubic in mean $\pT$ and multiplicity, you have already done this in
+spirit. The MLP just lets the polynomial be much higher order and
+much more flexible.
+
+\subsection{Why we picked it}
+
+It is the lower-bound baseline. The MLP tells us: \emph{how much
+performance comes from having any flexible nonlinear model at all,
+vs. how much actually requires per-particle information?} If the MLP
+on summary statistics already matches the more sophisticated
+permutation-invariant models, then per-particle information is not
+the key ingredient at FXT, and the paper's story shifts to
+``calibrated UQ + multi-energy training do the work, even on summary
+features.'' If the MLP loses, we have quantified the value of going
+particle-level.
+
+\subsection{Known limitations}
+
+It can only ever exploit information present in the hand-built summary
+features. Any signal living in the joint distribution of individual
+particle kinematics (e.g.\ angular correlations, $\pT$ spectrum shape)
+is invisible to it. At FXT energies, where the per-event statistics
+are small (of order $10^2$ tracks even in central events) and every
+track potentially matters, this is a real handicap.
+
+% =====================================================================
+\section{Architecture 2 -- DeepSets}
+\label{sec:deepsets}
+
+\subsection{Input}
+
+The variable-length particle list directly:
+$\{(\pT^{(i)}, \etalab^{(i)}, \phi^{(i)}, q^{(i)})\}_{i=1}^N$
+where $N$ varies event by event. We pad shorter events to the same
+length with masked-out zeros for efficient batching, but the network
+ignores the padding.
+
+\subsection{Core idea}
+
+Zaheer et al.\ (NeurIPS 2017) proved a clean theorem: \emph{any}
+permutation-invariant function of a set can be written in the form
+\[
+   f(\{x_1, \dots, x_N\}) = \rho\!\left(\sum_{i=1}^N \phi(x_i)\right)
+\]
+where $\phi$ and $\rho$ are arbitrary functions (in practice, both are
+MLPs). The model first applies the \emph{same} small MLP $\phi$ to
+each particle independently, producing a per-particle embedding (say,
+a 64-dim vector). It then \emph{pools} these embeddings by summing
+(or averaging, or max-pooling --- any symmetric operation) across the
+list. The result is a single fixed-size event embedding, which is
+then passed through another MLP $\rho$ to produce the output.
+
+The sum step is what guarantees permutation invariance: $\sum_i$ does
+not care about the order of the summands.
+
+\subsection{Physicist analogy}
+
+You have computed countless event-summed observables already. The
+total transverse energy $\sum_i E_{\text{T}}^{(i)}$ is exactly a
+DeepSets-style sum with $\phi(p) = E_{\text{T}}(p)$ and
+$\rho(\cdot) = \mathrm{identity}$. The flow vectors
+$Q_n = \sum_i e^{in\phi_i}$ are the same pattern with
+$\phi(p) = e^{in\phi_p}$. DeepSets says: \emph{let the network choose
+$\phi$ and $\rho$ for you, by gradient descent, optimized for the task
+you actually care about}. Instead of hand-designing an event-summed
+observable, you let the data tell you which 64 summed observables
+matter for predicting $b$.
+
+\subsection{Why we picked it}
+
+It is the cleanest permutation-invariant architecture and the natural
+``next step up'' from the MLP. The comparison MLP-vs-DeepSets isolates
+the value of per-particle information \emph{cleanly}, because
+DeepSets only differs from the MLP in having an actual per-particle
+stage. It is also fast, easy to train, and easy to interpret --- you
+can inspect what $\phi$ has learned.
+
+\subsection{Known limitations}
+
+The pool is a bottleneck. Two events that have the same per-particle
+sum but different per-particle structure (for example, two narrow
+back-to-back jets vs.\ an isotropic distribution with the same total
+$\pT$) collapse to the same event embedding. The model has no way to
+capture interactions \emph{between} particles, only their independent
+contributions. For our purposes this may not matter much --- FXT
+events are not jet-like --- but it is the theoretical ceiling on what
+DeepSets can do.
+
+\clearpage
+% =====================================================================
+\section{Architecture 3 -- Set Transformer}
+\label{sec:settransformer}
+
+\subsection{Input}
+
+Same as DeepSets: the variable-length per-particle list.
+
+\subsection{Core idea}
+
+The Set Transformer (Lee et al., ICML 2019) replaces DeepSets'
+independent per-particle embedding with one in which particles can
+\emph{see each other} through attention. The headline operation is
+the \emph{self-attention block}. For a list of $N$ particles, each
+particle $i$ updates its embedding by taking a weighted average of
+\emph{all other} particles' embeddings, where the weights are learned
+based on which pairs are most relevant:
+\[
+   h_i^{\text{new}} = \sum_{j=1}^N \alpha_{ij}\, V(x_j),
+   \qquad
+   \alpha_{ij} = \frac{\exp(Q(x_i) \cdot K(x_j))}{\sum_k \exp(Q(x_i) \cdot K(x_k))}.
+\]
+The functions $Q$, $K$, $V$ (``query, key, value'') are learned linear
+maps. After several such blocks, the per-particle embeddings encode
+not just the particle's own properties but its relationship to every
+other particle in the event. The model finally pools using
+\emph{PMA} (pooling by multi-head attention), which is itself a
+learned permutation-invariant operation.
+
+The whole thing is still strictly permutation invariant, because
+attention is computed by a sum that does not depend on particle order
+--- only the values of $Q, K, V$ matter, which are particle-local
+quantities.
+
+\subsection{Physicist analogy}
+
+Imagine you wanted to estimate centrality not just from each
+particle's $\pT$ in isolation, but from the spatial pattern of
+particles relative to each other (the gradient of multiplicity in
+$\phi$, two-particle correlations, the presence of a recoil jet, the
+azimuthal asymmetry that signals elliptic flow). Each of these
+requires comparing particles against other particles. Attention is the
+machinery that lets the network learn which pairs of particles matter
+for the task.
+
+The cost: self-attention scales as $\mathcal{O}(N^2)$ in particles per
+event, which is fine for $N \sim 100$ FXT events but expensive for
+$N \sim 1000+$.
+
+\subsection{Why we picked it}
+
+Two reasons. First, it is the strongest permutation-invariant
+baseline in modern ML --- if particle-particle correlations carry real
+centrality signal, this is the architecture that will find it.
+Second, the comparison Set Transformer vs.\ DeepSets isolates the
+value of \emph{interactions} beyond simple sums. If they tie,
+volume-fluctuation signal at FXT lives in the marginals, not in
+correlations. If the Set Transformer wins, correlations matter, and
+that itself is a publishable physics finding.
+
+\subsection{Known limitations}
+
+More parameters, slower to train, slightly more sensitive to
+hyperparameters than DeepSets. The interpretability is worse:
+inspecting what attention has learned is a research topic in its own
+right. There is also a small risk of overfitting on small per-event
+$N$ because attention has high capacity relative to the data per
+event.
+
+% =====================================================================
+\section{Architecture 4 -- Energy Flow Network (EFN)}
+\label{sec:efn}
+
+\subsection{Input}
+
+Same per-particle list as DeepSets and Set Transformer, but EFN
+distinguishes the ``energy'' (intensity) feature from the ``angle''
+(direction) features. In our setup, $\pT$ plays the role of energy,
+and $(\etalab, \phi, q)$ play the role of angles. (Charge isn't an
+``angle'' geometrically, but functionally it behaves the same way: a
+non-energy attribute of the particle.)
+
+\subsection{Core idea}
+
+The EFN (Komiske, Metodiev, Thaler --- JHEP 2019) is a
+\emph{constrained} DeepSets. Its functional form is
+\[
+   \mathrm{EFN}(\{p_i\})
+   = F\!\left(\sum_{i=1}^N z_i \, \Phi(\hat{n}_i)\right),
+\]
+where $z_i = \pT^{(i)}$ is the per-particle energy weight,
+$\hat{n}_i$ are the angular variables, $\Phi$ is a small MLP from
+angles to a latent vector, and $F$ is a larger MLP from the pooled
+vector to the output.
+
+Compare to the DeepSets form, $\rho(\sum_i \phi(p_i))$: the EFN takes
+$\phi(p_i) = z_i \, \Phi(\hat{n}_i)$, i.e.\ the per-particle embedding
+must be linear in the energy. That linearity constraint is the
+key. It makes the network \emph{IRC-safe}: infrared-and-collinear
+safe. In jet-physics language, IRC safety means the output is
+continuous under (i) the addition of a zero-energy particle
+(infrared safety) and (ii) the exact collinear splitting of one
+particle into two particles sharing the same total energy (collinear
+safety). Strictly, IRC safety guarantees only these limits --- it
+does \emph{not} by itself guarantee robustness to a finite
+$\pT > 50\,\text{MeV}$ cut or to finite-width detector smearing.
+Separately from IRC safety, the EFN output is a continuous (smooth
+MLP) function of the per-particle $\pT$ values, so small numerical
+perturbations in $\pT$ produce small changes in output; this is the
+property we actually exploit in the Phase B detector-emulation
+comparison.
+
+\subsection{Physicist analogy}
+
+The most natural example is the standard jet observable
+$\sum_i \pT^{(i)} f(\eta_i, \phi_i)$ --- this is exactly EFN form,
+with the function $f$ replaced by a learnable MLP $\Phi$. If you have
+used jet substructure observables like $N$-subjettiness, you have used
+an IRC-safe construction in spirit. EFN is the deep learning version:
+a function in this safe family, optimized end-to-end.
+
+\subsection{Why we picked it}
+
+Three reasons.
+
+\begin{enumerate}[leftmargin=*]
+\item It is the standard permutation-invariant architecture in
+      experimental HEP. Reviewers (especially LHC-side
+      machine-learners) will ask ``did you benchmark against EFN'' ---
+      we want a yes.
+\item IRC safety is a useful property for Phase B of our project, when
+      detector emulation kicks in. EFN by construction should degrade
+      gracefully under the $\sim 1\,\%$ $\pT$ smearing and tracking
+      inefficiency we apply. If it does (and DeepSets/Set Transformer
+      do not), that is informative.
+\item It positions us against the CBM PointNet line. PointNet is
+      \emph{not} IRC safe; using EFN explicitly contrasts our
+      methodology with theirs.
+\end{enumerate}
+
+\subsection{Known limitations}
+
+The linearity-in-energy constraint costs some flexibility. If the
+optimal solution requires nonlinear weighting of particle energies
+(say, particles below a threshold should be ignored entirely), EFN
+cannot represent that exactly. Komiske et al.\ also introduced
+\emph{PFN}, an unconstrained variant; we use the constrained EFN
+because the constraint is the whole point. Also, the choice of
+``energy'' weight $z_i$ is itself a modelling decision: the original
+EFN paper uses $z_i = \pT^{(i)}/\pT^{\text{jet}}$ or
+$E_i/E^{\text{jet}}$, and we use unnormalized $z_i = \pT^{(i)}$.
+That is a valid choice but it does mean the IRC-safety statement is
+relative to ``soft in $\pT$,'' not ``soft in total energy.'' At FXT
+energies this distinction matters less than at the LHC because the
+particles are non-relativistic enough that $\pT$, $E$, and $\pT/M$
+ordering of particles is similar; we still expect the structural
+inductive bias to be useful.
+
+\clearpage
+% =====================================================================
+\section{Side-by-side comparison}
+\label{sec:comparison}
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{l|X|X|X|X}
+\toprule
+              & \textbf{MLP}
+              & \textbf{DeepSets}
+              & \textbf{Set Transformer}
+              & \textbf{EFN} \\
+\midrule
+\textbf{Input type}
+              & Scalar summary features ($\sim 10$--20 numbers)
+              & Variable-length particle list
+              & Variable-length particle list
+              & Particle list, energy + angle split \\
+\midrule
+\textbf{Inductive bias}
+              & None beyond smoothness of the function
+              & Permutation invariance via symmetric sum/mean pool
+              & Permutation invariance + learned particle--particle interactions
+              & Permutation invariance + linearity in energy (IRC safe) \\
+\midrule
+\textbf{Rough parameter count}
+              & $10^4$--$10^5$
+              & $10^5$--$10^6$
+              & $10^6$--$10^7$
+              & $10^5$--$10^6$ \\
+\midrule
+\textbf{Expected strength at FXT}
+              & Trivially fast; transparent; lower-bound baseline
+              & Best simplicity-to-power ratio; clean comparison to MLP
+              & Captures correlations if they matter (flow, jet-like patterns)
+              & Robust to detector smearing; HEP-standard \\
+\midrule
+\textbf{Expected weakness at FXT}
+              & Blind to per-particle structure; can only learn from hand-engineered summaries
+              & Pool is a bottleneck; no particle--particle interactions
+              & Most parameters; risk of overfitting on small $N$; harder to interpret
+              & Linearity-in-energy constraint may cost flexibility; IRC safety less natural at FXT than for jets \\
+\bottomrule
+\end{tabularx}
+\caption{The four architectures at a glance. ``Rough parameter
+count'' is the order of magnitude we expect at the configurations we
+plan to train; final values depend on width and depth, which are
+hyperparameters.}
+\end{table}
+
+% =====================================================================
+\section{What we expect to learn from running all four}
+
+Each pairwise comparison answers a distinct physics-or-method
+question.
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{MLP vs.\ DeepSets} --- does per-particle information
+      beat hand-engineered summary features at FXT? At top RHIC and
+      LHC the answer is unambiguously yes. At low multiplicity it is
+      genuinely open: a 100-track central event has very few moments
+      that are not already captured by mean, sum, and a couple of
+      $\eta$-window multiplicities.
+
+\item \textbf{DeepSets vs.\ Set Transformer} --- do particle--particle
+      correlations carry centrality signal beyond the marginals? If
+      the Set Transformer wins by a noticeable margin, that is itself
+      a finding worth a paragraph in the discussion section, because
+      it tells the cumulant-analysis community something about what
+      they are throwing away when they collapse to multiplicity.
+
+\item \textbf{DeepSets vs.\ EFN} --- does the IRC-safety constraint
+      cost us performance at truth level, and does it pay off under
+      detector emulation in Phase B? The Phase A vs.\ Phase B
+      comparison for EFN is one of the cleanest experiments in the
+      project.
+
+\item \textbf{All four vs.\ Glauber/RefMult baselines} --- this is the
+      headline plot. We expect every ML model to beat the classical
+      baselines in the peripheral regime where $\sim 47\,\%$ of FXT
+      events have zero charged particles in $|\eta_{\text{CM}}|<0.5$
+      (see CLAUDE.md; SMASH dumps CM-frame 4-momenta, so this is the
+      CM-frame mid-rapidity acceptance). The interesting question is
+      how the four
+      stratify among themselves.
+
+\item \textbf{Calibrated UQ} --- across the four architectures, are
+      the evidential uncertainty bars actually well-calibrated? If the
+      Amini-NIG ``mirage'' critique bites, we will see it as
+      systematic over- or under-coverage, and we will fall back to
+      deep ensembles for the headline numbers.
+\end{itemize}
+
+The four-architecture comparison is not just hedging: it is a
+controlled experiment in which the inputs and the heads are held
+fixed, and only the inductive bias varies. That is what makes the
+result publishable as a methodology study rather than as a one-off
+benchmark.
+
+% =====================================================================
+\section*{Further reading}
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+\item Zaheer et al., \emph{Deep Sets}, NeurIPS 2017,
+      \texttt{arXiv:1703.06114}.
+\item Lee et al., \emph{Set Transformer}, ICML 2019,
+      \texttt{arXiv:1810.00825}.
+\item Komiske, Metodiev, Thaler, \emph{Energy Flow Networks: Deep
+      Sets for Particle Jets}, JHEP 01 (2019) 121,
+      \texttt{arXiv:1810.05165}.
+\item Amini et al., \emph{Deep Evidential Regression}, NeurIPS 2020,
+      \texttt{arXiv:1910.02600}.
+\item The Amini-NIG critique: \texttt{arXiv:2510.18322} ---
+      background reading on why we back up evidential UQ with deep
+      ensembles.
+\item Mallick, Tripathy, Behera, et al., \emph{Estimation of impact
+      parameter and transverse spherocity in heavy-ion collisions
+      using machine learning}, \texttt{arXiv:2103.01736} --- the
+      closest prior art at top RHIC/LHC.
+\item Omana Kuttan et al., \emph{A fast centrality-meter for the CBM
+      experiment}, Phys.\ Lett.\ B 811 (2020) 135872,
+      \texttt{arXiv:2009.01584} --- the closest prior art in the FXT
+      regime, using PointNet.
+\end{itemize}
+
+\end{document}

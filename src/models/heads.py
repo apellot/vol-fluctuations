@@ -29,25 +29,41 @@ def make_mlp(in_dim: int, hidden: int, depth: int, dropout: float) -> nn.Sequent
     return nn.Sequential(*layers)
 
 
-class OutputHeads(nn.Module):
-    """Linear NIG (4 outputs) + linear classification (n_bins outputs) on top of the trunk.
+def nig_from_raw(raw: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Map a (…, 4) raw linear output to NIG params (μ, ν, α, β).
 
-    The NIG raw outputs are mapped through softplus+offsets to enforce
-    ν > 0, α > 1, β > 0 (μ unconstrained), matching src/losses/evidential.py.
+    softplus+offsets enforce ν > 0, α > 1, β > 0 (μ unconstrained), matching
+    src/losses/evidential.py.
     """
-    def __init__(self, trunk_dim: int, n_centrality_bins: int) -> None:
+    mu = raw[..., 0]
+    nu = nn.functional.softplus(raw[..., 1]) + 1e-6
+    alpha = nn.functional.softplus(raw[..., 2]) + 1.0 + 1e-6
+    beta = nn.functional.softplus(raw[..., 3]) + 1e-6
+    return mu, nu, alpha, beta
+
+
+class OutputHeads(nn.Module):
+    """Two evidential NIG heads — one for b, one for Npart. NO classification head.
+
+    Centrality is derived downstream from predicted Npart (rank → percentile bins),
+    not learned here (see docs/modelling_plan.md, 2026-05-28). Both targets are
+    trained in STANDARDIZED space; the trainer inverts μ/σ back to physical units.
+
+    `n_centrality_bins` is accepted but ignored for back-compat with the model
+    configs that still carry the field — there is no classifier any more.
+    """
+    def __init__(self, trunk_dim: int, n_centrality_bins: int | None = None) -> None:
         super().__init__()
-        self.nig = nn.Linear(trunk_dim, 4)
-        self.classifier = nn.Linear(trunk_dim, n_centrality_bins)
+        self.b_nig = nn.Linear(trunk_dim, 4)
+        self.npart_nig = nn.Linear(trunk_dim, 4)
 
     def forward(self, h: Tensor) -> dict[str, Tensor]:
-        raw = self.nig(h)
-        mu = raw[..., 0]
-        nu = nn.functional.softplus(raw[..., 1]) + 1e-6
-        alpha = nn.functional.softplus(raw[..., 2]) + 1.0 + 1e-6
-        beta = nn.functional.softplus(raw[..., 3]) + 1e-6
-        logits = self.classifier(h)
-        return {"mu": mu, "nu": nu, "alpha": alpha, "beta": beta, "logits": logits}
+        b_mu, b_nu, b_alpha, b_beta = nig_from_raw(self.b_nig(h))
+        np_mu, np_nu, np_alpha, np_beta = nig_from_raw(self.npart_nig(h))
+        return {
+            "b_mu": b_mu, "b_nu": b_nu, "b_alpha": b_alpha, "b_beta": b_beta,
+            "np_mu": np_mu, "np_nu": np_nu, "np_alpha": np_alpha, "np_beta": np_beta,
+        }
 
 
 def masked_mean(x: Tensor, mask: Tensor) -> Tensor:

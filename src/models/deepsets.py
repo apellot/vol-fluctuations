@@ -25,7 +25,7 @@ from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp, mas
 
 @dataclass
 class DeepSetsConfig:
-    n_centrality_bins: int
+    n_centrality_bins: int | None = None  # ignored (no classifier); kept for back-compat
     phi_hidden: int = 128
     phi_depth: int = 2
     rho_hidden: int = 128

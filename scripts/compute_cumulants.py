@@ -14,15 +14,17 @@ Method:
         3. Compute ratios C2/C1, C3/C2, C4/C2
         4. Compare to oracle (truth-b binning)
 
+Primary study is UrQMD + detector (2026-05-28 restructure).
+
 Usage:
     python scripts/compute_cumulants.py \\
-        --cache data/processed/cached/all_padded.h5 \\
-        --truth-dir data/processed/truth/ \\
-        --glauber-dir data/processed/glauber/ \\
-        --pred-dirs efn:data/processed/efn/baseline_v1 \\
-                    pfn:data/processed/pfn/baseline_v1 \\
-                    deepsets:data/processed/deepsets/baseline_v1 \\
-                    gnn:data/processed/gnn/baseline_v1 \\
+        --cache data/processed/cached/urqmd_padded_det.h5 \\
+        --truth-dir data/processed/truth/urqmd/ \\
+        --glauber-dir data/processed/glauber/urqmd/ \\
+        --pred-dirs efn:data/processed/efn/urqmd_v1 \\
+                    pfn:data/processed/pfn/urqmd_v1 \\
+                    deepsets:data/processed/deepsets/urqmd_v1 \\
+                    gnn:data/processed/gnn/urqmd_v1 \\
         --output-dir figures/cumulants/
 """
 from __future__ import annotations

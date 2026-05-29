@@ -19,9 +19,13 @@ uniformly.
 
 Usage:
     python scripts/run_glauber.py \\
-        --smash-inputs data/processed/auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --glauber-dir  data/processed/glauber \\
-        --output-dir   data/processed/glauber
+        --transport smash \\
+        [--cache       data/processed/cached/smash_padded_v2.h5] \\
+        [--glauber-dir data/processed/glauber/smash] \\
+        [--output-dir  data/processed/glauber/smash]
+
+    # UrQMD variant — uses the per-transport refit from fit_glauber.py.
+    python scripts/run_glauber.py --transport urqmd
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ import numpy as np
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.baselines.truth import DEFAULT_BIN_EDGES, DEFAULT_BIN_LABELS  # noqa: E402
+from src.baselines.truth import DEFAULT_BIN_EDGES, DEFAULT_BIN_LABELS, assign_bins  # noqa: E402
 
 
 def process_energy(mult_smash: np.ndarray, b_true: np.ndarray, sqrtsNN: float,
@@ -55,7 +59,7 @@ def process_energy(mult_smash: np.ndarray, b_true: np.ndarray, sqrtsNN: float,
     # Map each Glauber event to a centrality bin → compute the per-bin mean and std of
     # the Glauber model b. These are the "predicted b" and its in-bin spread for that
     # centrality class. By construction this is what the Glauber baseline outputs.
-    bins_glauber = _assign_bins(mult_glauber, mult_thresholds)
+    bins_glauber = assign_bins(mult_glauber, mult_thresholds)
     n_bins = len(labels)
     b_means = np.full(n_bins, np.nan, dtype=np.float64)
     b_stds = np.full(n_bins, np.nan, dtype=np.float64)
@@ -67,10 +71,13 @@ def process_energy(mult_smash: np.ndarray, b_true: np.ndarray, sqrtsNN: float,
             b_means[k] = float(b_glauber[sel].mean())
             b_stds[k] = float(b_glauber[sel].std())
 
-    # Apply to SMASH events.
-    bins_smash = _assign_bins(mult_smash, mult_thresholds)
-    b_pred = np.where(np.isnan(b_means[bins_smash]),
-                      np.nan, b_means[bins_smash]).astype(np.float32)
+    # Apply to the transport (data) events.
+    bins_smash = assign_bins(mult_smash, mult_thresholds)
+    # Out-of-scope events (bins == -1, beyond the 80 % edge) get NaN; in-scope
+    # events take their bin's mean Glauber b (which may itself be NaN if empty).
+    in_scope = bins_smash >= 0
+    b_pred = np.full(bins_smash.shape, np.nan, dtype=np.float32)
+    b_pred[in_scope] = b_means[bins_smash[in_scope]].astype(np.float32)
 
     # Quality diagnostics on SMASH side: residual stats per bin.
     counts_s = np.zeros(n_bins, dtype=np.int64)
@@ -109,22 +116,45 @@ def process_energy(mult_smash: np.ndarray, b_true: np.ndarray, sqrtsNN: float,
     }
 
 
-def _assign_bins(mult: np.ndarray, mult_thresholds: np.ndarray) -> np.ndarray:
-    """Vectorized assignment — matches the truth-baseline convention so the two baselines
-    can be compared bin-by-bin downstream."""
-    asc = -mult_thresholds
-    idx = np.searchsorted(asc, -mult, side="right") - 1
-    return np.clip(idx, 0, len(mult_thresholds) - 1).astype(np.int16)
+# Centrality binning uses the canonical src.baselines.truth.assign_bins (imported
+# above) so the Glauber and truth baselines share one definition — no local copy.
+
+
+# Detector-emulated caches are the headline study (2026-05-28 restructure);
+# UrQMD is the primary transport. Pass --transport smash for the secondary set.
+DEFAULT_CACHE = {
+    "smash": Path("data/processed/cached/smash_padded_v2_det.h5"),
+    "urqmd": Path("data/processed/cached/urqmd_padded_det.h5"),
+}
+DEFAULT_GLAUBER_DIR = {
+    "smash": Path("data/processed/glauber/smash"),
+    "urqmd": Path("data/processed/glauber/urqmd"),
+}
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--cache", required=True, type=Path,
-                   help="Lab-frame cache (provides mult_lab and truth b for each event)")
-    p.add_argument("--glauber-dir", required=True, type=Path,
-                   help="Directory holding glauber_events_<tag>GeV.h5 files from fit_glauber.py")
-    p.add_argument("--output-dir", required=True, type=Path)
+    p.add_argument("--transport", choices=["smash", "urqmd"], default="urqmd",
+                   help="Transport model whose multiplicity distribution this baseline scores. "
+                        "Picks default --cache, --glauber-dir, and --output-dir for that transport.")
+    p.add_argument("--cache", type=Path, default=None,
+                   help="Padded cache (provides mult_lab and truth b per event). "
+                        "Defaults to the canonical cache for the chosen --transport.")
+    p.add_argument("--glauber-dir", type=Path, default=None,
+                   help="Directory holding glauber_events_<tag>GeV.h5 files from fit_glauber.py. "
+                        "Defaults to data/processed/glauber/{transport}/.")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="Output directory. Defaults to data/processed/glauber/{transport}/.")
     args = p.parse_args()
+
+    if args.cache is None:
+        args.cache = DEFAULT_CACHE[args.transport]
+    if args.glauber_dir is None:
+        args.glauber_dir = DEFAULT_GLAUBER_DIR[args.transport]
+    if args.output_dir is None:
+        args.output_dir = DEFAULT_GLAUBER_DIR[args.transport]
+    print(f"transport={args.transport}  cache={args.cache}  "
+          f"glauber_dir={args.glauber_dir}  output_dir={args.output_dir}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(args.cache, "r") as h:

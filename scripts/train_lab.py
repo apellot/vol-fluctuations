@@ -12,7 +12,7 @@ Usage (single seed, throttled to 4 cores and low priority):
     OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 nice -n 10 python3 scripts/train_lab.py \\
         --arch deepsets \\
         --cache data/processed/cached/all_lab_truth.h5 \\
-        --truth-preds data/processed/truth_lab/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --truth-preds data/processed/truth/smash/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --output-tag v1_truth \\
         --device mps --batch-size 256 --epochs 18 --num-workers 2
 """
@@ -191,7 +191,7 @@ def main() -> None:
     print(f"model: {n_params:,} parameters")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    ce = nn.CrossEntropyLoss()
+    ce = nn.CrossEntropyLoss(ignore_index=-1)  # -1 = beyond-80% events (out of centrality scope)
 
     ckpt_path = Path("checkpoints") / f"{args.arch}_{args.output_tag}" / "best.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)

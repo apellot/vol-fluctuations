@@ -18,7 +18,7 @@ Outputs:
 Usage:
     python scripts/train_mlp.py \\
         --inputs data/processed/auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --truth-preds data/processed/truth/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --truth-preds data/processed/truth/smash/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --output-tag baseline_v1
 """
 

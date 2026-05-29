@@ -14,7 +14,7 @@ spectator-dominated FXT regime — is shaded explicitly.
 Usage:
     python scripts/plot_baseline_resolution.py \\
         --truth-inputs data/processed/auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --pred-inputs  data/processed/truth/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --pred-inputs  data/processed/truth/smash/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --label Truth \\
         --output-dir   figures/baselines/truth
 """

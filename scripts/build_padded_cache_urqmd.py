@@ -1,31 +1,31 @@
-"""Build the lab-frame, charged-only, per-event padded SMASH training cache.
+"""Build the lab-frame, charged-only, per-event padded UrQMD training cache.
 
-Per the 2026-05-27 v1 scope lock (project_scope_v2.md); note SMASH is the
-SECONDARY generator after the 2026-05-28 restructure (UrQMD+detector is the
-headline — see docs/restructure_urqmd_detector_b14.md):
+Mirror of `scripts/build_padded_cache.py` (the SMASH builder), reading from the
+ingested UrQMD HDF5 files in `data/raw/urqmd_auau_*GeV.h5`. Same cuts (imported
+from `src/data/cuts.py`), same per-particle features, same per-event scalar
+features, same output schema — so SMASH and UrQMD caches are interchangeable
+inputs to the architectures.
 
-  * Boost particles from CM (SMASH default) to the lab/target-rest frame.
-  * Cuts: charged-only + spectator removal (see src/data/cuts.py).
-  * NO η window. NO pT cut. NO smearing.
-  * Event filter:  b < cuts.B_MAX_FM (14 fm) AND N_part > 0.
-  * Per-particle features stored:  pT, η_lab, φ, charge.
-  * Event-level features stored: b, N_part, sqrtsNN, energy_id, mult_lab,
-    mean_pT_lab, total_pT_lab.
-
-Both this script (SMASH) and `build_padded_cache_urqmd.py` (UrQMD) import the
-boost and the cut definitions from `src.data.cuts`. Any cut convention change
-must happen in that single module.
-
-Schema (single concatenated HDF5):
-    cont         (N_events, MAX_PARTICLES, N_CONT)    float32
-    length       (N_events,)                          int32
-    b            (N_events,)                          float32
-    Npart        (N_events,)                          int16
-    sqrtsNN      (N_events,)                          float32
-    energy_id    (N_events,)                          int8
-    mult_lab     (N_events,)                          int32
-    mean_pT_lab  (N_events,)                          float32
-    total_pT_lab (N_events,)                          float32
+UrQMD specifics:
+  * Particles in a flat group with `offset` of length n_events+1; particles
+    for event i live at `particles/*[offset[i]:offset[i+1]]`.
+  * The file stores (pT, η, φ, mass), NOT (p0, px, py, pz). We reconstruct
+    (p0_CM, pz_CM) from these and then boost — same path the SMASH builder
+    already uses (the SMASH ingest also strips raw 4-momentum down to derived
+    kinematics).
+  * Npart is read from the raw file's stored Glauber-header `Npart` field
+    (UrQMD 4.0 `Participants_Glauber`), which is always ≥0. This is the
+    2026-05-28 restructure decision: with UrQMD as the primary generator we
+    use its native participant count directly, since the cross-transport
+    SMASH-style spectator recompute (`cuts.npart_from_spectators`) only mattered
+    for joint SMASH+UrQMD training and produced a negative peripheral tail that
+    had forced the old b<11 cut. See docs/restructure_urqmd_detector_b14.md
+    (supersedes the recompute recommendation in docs/npart_reconciliation.md).
+    CAVEAT: confirm the nucleus/A behind this header before reporting it as a
+    physical Au participant count — native max ≈ 411 hints at an A=208 (Pb)
+    Glauber. `b` (the headline target) is unaffected either way.
+  * UrQMD's pdg field tags only nucleons/pions/kaons/η; Λ/Σ/Ξ/Δ/N* are pdg=0.
+    This DOES NOT affect spectator removal, which only looks at nucleons.
 """
 
 from __future__ import annotations
@@ -38,9 +38,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-# Import locked cuts from the shared module. We add the project root to sys.path
-# at script-launch time so `python scripts/build_padded_cache.py` works without
-# requiring an editable install.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -65,16 +62,11 @@ from src.data.cuts import (  # noqa: E402
     y_cm_to_lab,
 )
 
-# Per-particle continuous feature names; the model code reads N_CONT from here.
 CONT_FEATURE_NAMES = ["pT", "eta_lab", "phi", "charge"]
 N_CONT_FEATURES = len(CONT_FEATURE_NAMES)
 
-# Cap on per-event particle count after cuts. Truth mode: surviving count
-# includes the full forward beam jet so a wide cap is needed (empirical max at
-# 4.5 GeV ≈ 700–900). Detector mode trims this roughly in half via η<1.5,
-# pT>50 MeV, and ε≈90%; 384 gives ~25% headroom over the projected p95.
-# The defensive sort-and-truncate branch keeps highest-pT survivors if a single
-# event ever overshoots; we warn via the max_observed_particles attr.
+# Same caps as the SMASH builder so the two caches use identical fixed-shape
+# tensors and a downstream model sees the same input shape in each mode.
 MAX_PARTICLES_TRUTH = 1024
 MAX_PARTICLES_DETECTOR = 384
 
@@ -82,7 +74,7 @@ MAX_PARTICLES_DETECTOR = 384
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", required=True, nargs="+", type=Path,
-                   help="Ingested SMASH HDF5 files (one per energy, in increasing-energy order ideally)")
+                   help="Ingested UrQMD HDF5 files (one per energy, in increasing-energy order ideally)")
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--chunk-events", type=int, default=2000)
     p.add_argument("--detector", action="store_true",
@@ -93,33 +85,32 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    # MAX_PARTICLES depends on mode: truth mode keeps the full forward jet,
-    # detector mode trims hard so we can shrink the per-event tensor.
     MAX_PARTICLES = MAX_PARTICLES_DETECTOR if args.detector else MAX_PARTICLES_TRUTH
-
-    # RNG is only used in detector mode. Single Generator for the whole build —
-    # vectorized smear + Bernoulli consume from it in deterministic order, so
-    # the cache is bit-reproducible given (inputs, file order, chunk-events, seed).
     rng = np.random.default_rng(args.seed) if args.detector else None
 
-    # Pre-pass: read N_part and b per event, decide which events survive the
-    # locked event-level filter (b < cuts.B_MAX_FM AND N_part > 0).
+    # Pre-pass: event filter (b<B_MAX_FM AND N_part>0).  Npart is the raw file's
+    # native Glauber-header value (always ≥0); both the filter and the stored
+    # regression target use that same native convention.
     keep_masks = []
+    npart_native_all = []   # one array per input file, full event count
     raw_sizes = []
     sizes = []
     sqrts_list = []
     for in_path in args.inputs:
         with h5py.File(in_path, "r") as h:
-            npart_arr = h["Npart"][:]
             b_arr = h["b"][:]
+            npart_arr = h["Npart"][:].astype(np.int16)
             mask = event_passes(b_arr, npart_arr)
             keep_masks.append(mask)
+            npart_native_all.append(npart_arr)
             raw_sizes.append(int(npart_arr.size))
             sizes.append(int(mask.sum()))
+            # sqrtsNN is per-event in the UrQMD files; take it from attrs which
+            # holds the single value the file was generated at.
             sqrts_list.append(float(h.attrs["sqrtsNN"]))
     total = sum(sizes)
     mode = "DETECTOR-emulated" if args.detector else "truth-level"
-    print(f"Building SMASH {mode} lab-frame cache: keeping {total:,} of {sum(raw_sizes):,} events")
+    print(f"Building UrQMD {mode} lab-frame cache: keeping {total:,} of {sum(raw_sizes):,} events")
     print(f"  cuts applied: b < {B_MAX_FM} fm AND N_part > 0")
     if args.detector:
         print(f"  detector: {ETA_LAB_MIN} < η_lab < {ETA_LAB_MAX}, pT_smeared > {PT_MIN_GEV} GeV/c, "
@@ -130,7 +121,6 @@ def main() -> None:
     print(f"  MAX_PARTICLES = {MAX_PARTICLES}")
     print(f"  output: {args.output}")
 
-    # Summary table accumulators for the final report.
     report = []
 
     with h5py.File(args.output, "w") as out:
@@ -153,7 +143,8 @@ def main() -> None:
         out.attrs["feature_names"] = list(CONT_FEATURE_NAMES)
         out.attrs["source_files"] = [str(p) for p in args.inputs]
         out.attrs["b_max_fm"] = B_MAX_FM
-        out.attrs["generator"] = "SMASH"
+        out.attrs["generator"] = "UrQMD"
+        out.attrs["npart_source"] = "urqmd_glauber_header"
         out.attrs["cuts_module"] = "src/data/cuts.py"
         out.attrs["chunk_events"] = args.chunk_events
         out.attrs["detector_emulation"] = bool(args.detector)
@@ -180,10 +171,9 @@ def main() -> None:
                 y_boost = y_cm_to_lab(sqrtsNN)
                 offsets = src["offset"][:].astype(np.int64)
                 b_all = src["b"][:].astype(np.float32)
-                npart_all = src["Npart"][:].astype(np.int16)
+                # Native Glauber-header Npart, read in the pre-pass.
+                npart_all = npart_native_all[e_id]
 
-                # Per-particle datasets — keep handles open and slice per chunk
-                # rather than loading the entire ~5 GB into RAM up front.
                 pT_all = src["particles/pT"]
                 eta_cm_all = src["particles/eta"]
                 phi_all = src["particles/phi"]
@@ -195,7 +185,6 @@ def main() -> None:
                 print(f"  {sqrtsNN} GeV — y_cm→lab = {y_boost:.3f}, n_events = {n_src:,}")
                 t0 = time.time()
                 local_max = 0
-                # Running stats for the report row at this energy.
                 mult_sum = 0.0
                 npart_sum = 0.0
 
@@ -213,23 +202,26 @@ def main() -> None:
                     pdg = pdg_all[p_lo:p_hi].astype(np.int32)
                     ncoll = ncoll_all[p_lo:p_hi].astype(np.int16)
 
-                    # Reconstruct CM-frame (p0, pz) from (pT, η_cm, mass).
-                    # pz = pT·sinh(η) is exact for pseudorapidity by definition;
-                    # p0 = √(pT² cosh²η + m²) follows from the mass shell.
-                    pz_cm = pT * np.sinh(eta_cm)
-                    p0_cm = np.sqrt(pT * pT * np.cosh(eta_cm) ** 2 + mass * mass)
-                    p0_lab, pz_lab = boost_cm_to_lab(p0_cm, pz_cm, sqrtsNN)
-                    eta_lab = eta_from_pz(pT, pz_lab).astype(np.float32)
+                    # Reconstruct CM-frame (p0, pz) — same identity as in the
+                    # SMASH builder (UrQMD ingest only stores derived kinematics).
+                    # A handful of UrQMD particles have sub-µeV pT (effectively
+                    # spectators) which gives inf in sinh(η); we silence the
+                    # transient RuntimeWarnings and drop them via np.isfinite()
+                    # in the particle filter below.
+                    with np.errstate(invalid="ignore", over="ignore"):
+                        pz_cm = pT * np.sinh(eta_cm)
+                        p0_cm = np.sqrt(pT * pT * np.cosh(eta_cm) ** 2 + mass * mass)
+                        p0_lab, pz_lab = boost_cm_to_lab(p0_cm, pz_cm, sqrtsNN)
+                        eta_lab = eta_from_pz(pT, pz_lab).astype(np.float32)
 
-                    # Locked particle filter from cuts.py (charged + non-spectator).
-                    # AND require finite η_lab — a handful of UrQMD particles have
-                    # sub-µeV pT which produces inf in η; SMASH is clean but we
-                    # apply the same defensive guard so both builders share code.
+                    # Locked particle filter — same module as SMASH builder.
+                    # AND require finite η_lab — a few hundred UrQMD particles
+                    # have sub-µeV pT (mostly spectator-like nucleons missed by
+                    # the ncoll==0 cut); those produce inf in η. We drop them
+                    # here to keep the cache numerically clean.
                     keep_p = particle_keep_mask(charge, pdg, ncoll) & np.isfinite(eta_lab)
 
-                    # Phase-B detector emulation: η window, pT smearing, pT_min on
-                    # smeared, Bernoulli ε(pT_smeared). pT_for_write is the array
-                    # actually written to the cache and used for mult/mean_pT.
+                    # Phase-B detector emulation (same as SMASH builder).
                     if args.detector:
                         pT_smeared = smear_pt(pT, rng)
                         keep_p = keep_p & detector_keep_mask(pT_smeared, eta_lab, rng)
@@ -249,9 +241,8 @@ def main() -> None:
                         sel = keep_p[s:e]
                         n_kept = int(sel.sum())
                         if n_kept > MAX_PARTICLES:
-                            # Defensive cap — keep highest-pT survivors. In
-                            # detector mode we sort by smeared pT so truncation
-                            # is consistent with what the model actually sees.
+                            # Sort by the pT actually written to the cache
+                            # (smeared in detector mode, truth otherwise).
                             pt_ev = pT_for_write[s:e][sel]
                             order = np.argsort(-pt_ev)[:MAX_PARTICLES]
                             keep_local = np.zeros(int(sel.sum()), dtype=bool)
@@ -273,7 +264,6 @@ def main() -> None:
                             tpt_buf[i] = float(ev_pt.sum())
                             mpt_buf[i] = float(ev_pt.mean())
 
-                    # Compact: write only events that pass the event-level filter.
                     chunk_keep = keep_mask_energy[chunk_start:chunk_end]
                     n_kept_in_chunk = int(chunk_keep.sum())
                     if n_kept_in_chunk == 0:
@@ -297,7 +287,6 @@ def main() -> None:
                 max_seen = max(max_seen, local_max)
                 elapsed = time.time() - t0
 
-                # Build the summary row for this energy.
                 if n_kept_this_energy > 0:
                     b_kept = b_all[keep_mask_energy]
                     report.append({
@@ -314,8 +303,7 @@ def main() -> None:
 
         out.attrs["max_observed_particles"] = max_seen
 
-    # Summary table.
-    print("\n=== SMASH cache build summary ===")
+    print("\n=== UrQMD cache build summary ===")
     print(f"{'sqrtsNN':>8} {'n_in':>8} {'n_out':>8} {'b_min':>7} {'b_max':>7} "
           f"{'<Npart>':>9} {'<mult_lab>':>11}")
     for r in report:

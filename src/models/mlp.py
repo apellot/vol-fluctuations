@@ -5,12 +5,9 @@ The model has a shared trunk and two heads:
   Trunk:
     F input features  →  [Linear → ReLU → Dropout] × depth  →  hidden vector.
 
-  Heads:
-    1. NIG head — four scalar outputs (μ_raw, ν_raw, α_raw, β_raw) mapped through
-       activations so ν > 0, α > 1, β > 0 (μ is unconstrained). Trained with the
-       evidential loss in src/losses/evidential.py.
-    2. Centrality classification head — softmax over n_bins centrality classes,
-       trained with cross-entropy against the truth-tuned bin label.
+  Heads (shared OutputHeads, 2026-05-28): two evidential NIG heads — one for b,
+    one for Npart (μ, ν, α, β each). No classification head; centrality is derived
+    downstream from predicted Npart. See docs/modelling_plan.md.
 
 Why a feature-vector MLP at all? It is the simplest ML baseline — beating it
 with a per-particle permutation-invariant network is what justifies the rest of
@@ -26,18 +23,21 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
+from .heads import OutputHeads
+
 
 @dataclass
 class MLPConfig:
     n_features: int          # number of scalar input features per event
-    n_centrality_bins: int   # number of softmax classes (matches the baseline binning)
+    n_centrality_bins: int | None = None  # ignored (no classifier); kept for back-compat
     hidden_dim: int = 128
     depth: int = 3           # number of hidden Linear layers
     dropout: float = 0.1
 
 
 class MLPHead(nn.Module):
-    """Trunk + two heads. Returns a dict to keep call sites self-documenting."""
+    """Trunk + dual evidential heads (b, Npart). Returns a dict; consumes the
+    event-level scalar feature vector x (B, n_features) — no per-particle list."""
 
     def __init__(self, cfg: MLPConfig) -> None:
         super().__init__()
@@ -48,22 +48,10 @@ class MLPHead(nn.Module):
             layers += [nn.Linear(in_dim, cfg.hidden_dim), nn.ReLU(), nn.Dropout(cfg.dropout)]
             in_dim = cfg.hidden_dim
         self.trunk = nn.Sequential(*layers)
-        self.head_nig = nn.Linear(cfg.hidden_dim, 4)
-        self.head_class = nn.Linear(cfg.hidden_dim, cfg.n_centrality_bins)
+        self.heads = OutputHeads(cfg.hidden_dim)
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
-        h = self.trunk(x)
-        raw = self.head_nig(h)
-        # Split the four raw outputs and apply the constraints (μ, ν, α, β).
-        mu = raw[..., 0]
-        # softplus → strictly positive; the +1 on alpha keeps the predictive
-        # Student-t with finite variance, since aleatoric ∝ 1/(α−1).
-        nu = nn.functional.softplus(raw[..., 1]) + 1e-6
-        alpha = nn.functional.softplus(raw[..., 2]) + 1.0 + 1e-6
-        beta = nn.functional.softplus(raw[..., 3]) + 1e-6
-
-        logits = self.head_class(h)
-        return {"mu": mu, "nu": nu, "alpha": alpha, "beta": beta, "logits": logits}
+        return self.heads(self.trunk(x))
 
 
 def count_parameters(model: nn.Module) -> int:

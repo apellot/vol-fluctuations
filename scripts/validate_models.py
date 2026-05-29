@@ -7,25 +7,19 @@ Produces four sets of diagnostics for each trained model + Glauber baseline:
     3. Uncertainty calibration (NIG 68% coverage) -- ML models only
     4. Pull distribution -- ML models only
 
-When --urqmd-cache / --urqmd-pred-dirs are supplied the same four plot sets
-are regenerated for the UrQMD cross-transport evaluation (files suffixed
-_urqmd) and a side-by-side SMASH-vs-UrQMD MAE comparison table is printed.
+The primary study is UrQMD + detector (2026-05-28 restructure). The optional
+--urqmd-* args remain wired for a cross-transport second pass (legacy names);
+point them at the SMASH detector set for the secondary SMASH-vs-UrQMD table.
 
 Usage:
     python scripts/validate_models.py \
-        --cache data/processed/cached/all_padded.h5 \
-        --truth-dir data/processed/truth/ \
-        --glauber-dir data/processed/glauber/ \
-        --pred-dirs efn:data/processed/efn/baseline_v1 \
-                    pfn:data/processed/pfn/baseline_v1 \
-                    deepsets:data/processed/deepsets/baseline_v1 \
-                    gnn:data/processed/gnn/baseline_v1 \
-        --urqmd-cache data/processed/cached/urqmd_padded.h5 \
-        --urqmd-truth-dir data/processed/urqmd_truth/ \
-        --urqmd-pred-dirs efn:data/processed/efn/urqmd_v1 \
-                          pfn:data/processed/pfn/urqmd_v1 \
-                          deepsets:data/processed/deepsets/urqmd_v1 \
-                          gnn:data/processed/gnn/urqmd_v1 \
+        --cache data/processed/cached/urqmd_padded_det.h5 \
+        --truth-dir data/processed/truth/urqmd/ \
+        --glauber-dir data/processed/glauber/urqmd/ \
+        --pred-dirs efn:data/processed/efn/urqmd_v1 \
+                    pfn:data/processed/pfn/urqmd_v1 \
+                    deepsets:data/processed/deepsets/urqmd_v1 \
+                    gnn:data/processed/gnn/urqmd_v1 \
         --output-dir figures/validation/
 """
 from __future__ import annotations

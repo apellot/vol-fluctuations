@@ -42,12 +42,21 @@ Mallick used boosted decision trees and shallow neural networks on AMPT events a
 
 ## What we do NOT do in v1 (possible follow-ups)
 
-- **Minimal detector emulation IS included** (decision 2026-05-17) — charged tracks only, pT > 50 MeV/c cut, Gaussian pT smearing (~1% + 0.5%·pT), ~90% tracking efficiency. This is acceptance + resolution + efficiency only, not a full GEANT/CBMRoot stack. The truth-level pipeline is also kept so the paper reports both. Full detector simulation (GEANT, calorimeter response, EMC reconstruction, vertex resolution, etc.) is still deferred.
+> **HEADLINE RESTRUCTURE (2026-05-28).** The primary study is now **UrQMD +
+> detector-emulated caches + full b<14 fm**, with UrQMD's **native** Glauber-header
+> Npart. SMASH and truth-level pipelines are demoted to secondary follow-ups (kept
+> on disk, not the default, not re-run for now). This reverses several "decision
+> 2026-05-27" lines below. See `docs/restructure_urqmd_detector_b14.md`.
+
+- **Detector-emulated pipeline IS the headline study; truth-level is a secondary ablation** (decision 2026-05-28, was truth-default 2026-05-27). Both caches exist:
+  - Detector caches (`*_padded_det.h5`, **primary**): `0 < η_lab < 1.5`, `pT_smeared > 50 MeV/c`, Gaussian pT smearing `σ/pT = 0.01 + 0.005·pT`, logistic ε(pT) with 50% at 75 MeV plateauing at 90%. b<14 event filter; only per-particle stage changes. See `docs/detector_cache_check.md`.
+  - Truth caches (`*_padded.h5`, secondary): no η cut, no pT cut, no smearing, no efficiency. Lab frame only.
 - No real STAR data application.
 - No CIGAR (Wang & Luo arXiv:2505.03666) direct comparison.
-- No joint inference of (b, N_part, N_coll, V) — just b and percentile for v1.
+- **Joint targets are `b` + `N_part` only.** N_coll still deferred (2026-05-28): UrQMD's Glauber emits a binary-collision count, but it was not extracted at ingestion and the raw f13 + `ingest_urqmd.py` are on a remote STAR cluster (not local) — adding it needs a re-ingestion pass. SMASH's per-particle ncoll counts all scatterings, not Glauber binary NN.
 - No cumulant-aware training loss — standard regression objective.
-- No cross-transport-model validation (no UrQMD or AMPT cross-check).
+- **UrQMD is the PRIMARY generator** (decision 2026-05-28, was cross-transport-only 2026-05-27). 100k events per energy at all four FXT energies (`data/raw/urqmd_auau_*GeV.h5`); SMASH is the secondary cross-transport check using the identical pipeline.
+- No AMPT cross-check.
 
 ---
 
@@ -120,13 +129,27 @@ Confirm:
 
 ### Task 2 — Data pipeline
 
-Convert SMASH output to a standardized HDF5/Parquet dataset with one row per event:
-- Truth labels (b, N_part, N_coll)
-- Per-particle arrays (pT, η, φ, m, charge) — variable-length, padded for batching
-- Event-level summary features (charged multiplicity in η windows, mean pT per species, forward-energy proxy)
-- Energy label (one of the 4 FXT energies)
+Convert SMASH and UrQMD output to a standardized HDF5 padded cache, one row per event, **identical schema for both generators**:
+- Truth labels: `b` (fm), `N_part`. N_coll deferred (see "What we do NOT do in v1").
+- Per-particle arrays in lab frame (`pT`, `η_lab`, `φ`, `charge`) — variable-length, padded for batching
+- Event-level lab-frame scalars: `√sNN`, `mult_lab`, `mean_pT_lab`, `total_pT_lab`
+- Energy label
 
-Quick sanity plots: multiplicity-vs-b at each energy, b-distribution (should be triangular for min-bias), N_part-vs-b.
+Cuts are imported from a single shared module `src/data/cuts.py` and applied identically to SMASH and UrQMD:
+- CM→lab (target-rest) boost: `(γ,β) = (cosh y_cm, tanh y_cm)`, `y_cm = arccosh(√sNN/(2·M_N))`.
+- `b < 14 fm` event filter (symmetric on both generators) — the full UrQMD range (decision 2026-05-28). The earlier b<11 tightening only existed to dodge the spectator-rule negative-Npart tail on UrQMD; since the UrQMD-primary study now uses native Npart (next bullet), that pathology no longer applies. See `docs/restructure_urqmd_detector_b14.md` (supersedes the b<11 conclusion in `docs/npart_reconciliation.md`).
+- **UrQMD (primary) uses its native Glauber-header `Npart`** (always ≥0; `src/data/build_padded_cache_urqmd.py` reads stored `h["Npart"]`). The SMASH-style spectator recompute `src/data/cuts.npart_from_spectators` (rule: `2A − N_spec`, A=197) is retained for the SMASH ingest and as a diagnostic only. CAVEAT: native UrQMD Npart max ≈ 411 (> 2·197) hints its Glauber may use A=208 (Pb) — confirm the nucleus before reporting Npart as a physical Au count; `b` is unaffected.
+- `N_part > 0` (drop geometric misses).
+- Charged-only filter for per-particle inputs.
+- Spectator removal: nucleon `∧ ncoll == 0` (caveat: SMASH/UrQMD `ncoll` count slightly different scatterings; document, don't fix).
+- No η window, no pT cut, no smearing, no efficiency in v1.
+
+Pipeline lives in:
+- `scripts/build_padded_cache.py` — SMASH builder (existing)
+- `scripts/build_padded_cache_urqmd.py` — UrQMD builder (to be added)
+- `src/data/cuts.py` — shared cuts + boost (to be added)
+
+Quick sanity plots: multiplicity-vs-b at each energy, b-distribution (should be triangular for min-bias on both sides, both capped at 11 fm), N_part-vs-b.
 
 ### Task 3 — Classical baselines
 

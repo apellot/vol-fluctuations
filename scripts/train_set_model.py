@@ -12,7 +12,7 @@ Outputs:
 Usage:
     python scripts/train_set_model.py --arch deepsets \\
         --inputs data/processed/auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
-        --centrality-preds data/processed/truth/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
+        --centrality-preds data/processed/truth/smash/truth_auau_{3p2,3p5,3p9,4p5}GeV.h5 \\
         --output-tag baseline_v1
 """
 
@@ -148,7 +148,7 @@ def main() -> None:
     print(f"model: {n_params:,} parameters")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    ce = nn.CrossEntropyLoss()
+    ce = nn.CrossEntropyLoss(ignore_index=-1)  # -1 = beyond-80% events (out of centrality scope)
 
     ckpt_path = Path("checkpoints") / f"{args.arch}_{args.output_tag}" / "best.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)

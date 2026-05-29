@@ -31,7 +31,7 @@ from .heads import N_CONT_FEATURES, N_EVENT_FEATURES, OutputHeads, make_mlp
 
 @dataclass
 class SetTransformerConfig:
-    n_centrality_bins: int
+    n_centrality_bins: int | None = None  # ignored (no classifier); kept for back-compat
     d_model: int = 96
     n_heads: int = 4
     n_sab: int = 2
