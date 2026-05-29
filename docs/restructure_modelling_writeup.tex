@@ -1,0 +1,168 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+
+\newcommand{\snn}{\sqrt{s_{NN}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\vspace{-1.5em}ML Centrality at FXT: Restructure to UrQMD+Detector+$b<14$,\\
+Centrality-Binning Fixes, and Phase-1 Dual-Evidential Modelling}
+\author{Mathias Labont\'e \\ \small (working note accompanying the corresponding commit)}
+\date{2026-05-29}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\section{Summary}
+This note documents three coupled changes pushed in this commit: (i) a scope
+restructure making \textbf{UrQMD + detector emulation + the full impact-parameter
+range $b<14$\,fm} the headline study; (ii) a fix to a centrality-binning
+off-by-one that affected both classical baselines and the ML labels, plus a
+refit of the Glauber baseline; and (iii) Phase~1 of the modelling work --- two
+evidential heads (for $b$ and $N_{\rm part}$) replacing the previous
+regression+classification design, with centrality derived from predicted
+$N_{\rm part}$. Full per-decision detail lives in
+\code{docs/restructure\_urqmd\_detector\_b14.md} and \code{docs/modelling\_plan.md};
+this note gives the narrative and the rationale.
+
+\section{Data restructure (UrQMD + detector + $b<14$)}
+\textbf{What changed.} The primary pipeline is now the UrQMD generator with the
+detector-emulated cache (\code{urqmd\_padded\_det.h5}: $0<\eta_{\rm lab}<1.5$,
+$p_T$ smearing, $p_T$ threshold, logistic tracking efficiency), spanning the full
+$b<14$\,fm range at all four energies $\snn = 3.2, 3.5, 3.9, 4.5$\,GeV
+(396{,}218 events). SMASH and the truth-level caches are retained but demoted to
+secondary comparisons. The shared cut/boost module \code{src/data/cuts.py} now
+sets \code{B\_MAX\_FM = 14}.
+
+\textbf{Why.} The detector-emulated, full-range, transport-robust configuration is
+the one most representative of a real FXT measurement, so it is the right setting
+for the headline result rather than an idealized truth-level subset.
+
+\textbf{$N_{\rm part}$ definition.} UrQMD's \emph{native} Glauber-header
+$N_{\rm part}$ is used directly (always $\geq 0$). The earlier SMASH-style
+spectator recompute, $N_{\rm part} = 2A - N_{\rm spec}$ with
+$N_{\rm spec}=\#\{\text{nucleon} \wedge n_{\rm coll}=0\}$, produced a negative
+peripheral tail in UrQMD: its \code{ncoll} counter does not inherit to
+decay-produced nucleons, so $\Delta\!\to\!N\pi$ daughters were mis-counted as
+spectators, driving $\sim$4.5\% of $b\in[11,14]$ events to $N_{\rm part}<0$. That
+recompute existed only to make SMASH and UrQMD $N_{\rm part}$ comparable for joint
+training, which is now deprioritized; using the native value removes the
+pathology and lets us keep the full $b<14$ range. We verified
+$\mathrm{corr}(N_{\rm part}, b)\approx-0.98$ in the cache, confirming it is a
+clean monotonic centrality variable.
+
+\textbf{Open caveat.} The native $N_{\rm part}$ reaches a maximum of $\sim$411,
+and the ingest note computes its diagnostic with $2\times208$ (Pb), whereas Au has
+$A=197$ ($2A=394$). A value above 394 is impossible for Au+Au, so the nucleus /
+mass number behind UrQMD's Glauber header must be confirmed before reporting
+$N_{\rm part}$ as a physical Au participant count. The headline target $b$ is
+unaffected, and centrality binning is rank-based (hence robust to the absolute
+scale). $N_{\rm coll}$ remains deferred --- it was not extracted at ingestion and
+the raw output is not locally available.
+
+\section{Classical baselines: binning fix and Glauber refit}
+\textbf{Centrality-binning bug.} The shared \code{assign\_bins} (in
+\code{src/baselines/truth.py}, duplicated in \code{run\_glauber.py}) computed the
+class index as \code{searchsorted(...)-1} followed by a clip. With seven
+percentile thresholds this merged the most-central stratum into bin~0, so the
+label ``0--5\%'' actually held the top $\sim$10\% and every subsequent percentile
+label was shifted; a genuine most-central 5\% class did not exist. Because the
+same helper produced the truth baseline, the Glauber baseline, \emph{and} the ML
+classification labels, all three shared the identical (mis-labelled) binning ---
+so relative comparisons were fair, but the absolute centrality labels were wrong.
+The fix uses \code{searchsorted(side="left")} without the $-1$ and sends events
+beyond the 80\% edge to $-1$ (out of scope); the canonical helper is now imported
+in one place. Verified to reproduce the nominal $5/5/10/10/10/20/20\%$ widths.
+
+\textbf{Glauber refit.} The two-component NBD Glauber was refit per energy to the
+detector multiplicity with a low-multiplicity cut (\code{--fit-mult-min 11},
+i.e.\ multiplicity $>10$) that excludes the ultra-peripheral spike from the
+$\chi^2$ window. The fitted-region residual is good at all energies (median
+$|{\rm rel}|\approx4$--$6\%$); a diagnostic was also corrected so the reported
+bulk residual respects the fit window (previously it was inflated by the excluded
+spike, e.g.\ 18\% reported vs.\ $\sim$5\% true). Per-centrality $\langle
+b\rangle$ and $\langle N_{\rm part}\rangle$ tables are now emitted and are
+consistent across energies, as expected for energy-independent geometry.
+
+\textbf{Bar to beat.} On the fixed binning, the classical $b$-resolution
+(MAE per centrality class) is summarized in Table~\ref{tab:bar}. The truth-tuned
+percentile baseline --- the upper bound on any multiplicity-only classical method
+--- is the meaningful target for the ML to beat.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccccc}
+\toprule
+method ($\snn=3.2$) & 0--5\% & 5--10\% & 10--20\% & 20--30\% & 30--40\% & 40--60\% & 60--80\% \\
+\midrule
+Truth-tuned & 0.84 & 0.73 & 0.71 & 0.62 & 0.58 & 0.70 & 0.69 \\
+Glauber     & 0.86 & 0.75 & 0.77 & 0.72 & 0.76 & 0.92 & 0.70 \\
+\bottomrule
+\end{tabular}
+\caption{Classical-baseline $b$-MAE (fm) per centrality class at $\snn=3.2$\,GeV.
+Other energies are within a few percent. Truth-tuned $\approx$ 0.58--0.85\,fm is
+the bar.}
+\label{tab:bar}
+\end{table}
+
+\section{Phase-1 modelling: dual evidential heads}
+\textbf{Heads.} The shared \code{OutputHeads} now carries \emph{two} evidential
+Normal-Inverse-Gamma heads --- one for $b$, one for $N_{\rm part}$
+($\mu,\nu,\alpha,\beta$ each) --- and \emph{no} classification head. Both targets
+are $z$-standardized on the train split and predicted in standardized space; the
+trainer inverts $\mu$ and scales $\sigma$ back to physical units. The combined
+loss is $\mathcal{L} = \mathcal{L}_{\rm evid}(b) + w\,\mathcal{L}_{\rm
+evid}(N_{\rm part})$.
+
+\textbf{Centrality from $N_{\rm part}$, not $b$.} Centrality is derived by ranking
+events on the chosen estimator and cutting the standard percentile edges:
+predicted $N_{\rm part}$ for the ML method, true $N_{\rm part}$ for the oracle,
+multiplicity for the classical baselines. $N_{\rm part}$ is the participant /
+volume measure that drives particle production and the volume fluctuations the
+analysis targets, so binning on it controls volume more tightly than $b$ (at fixed
+$b$, $N_{\rm part}$ still has a Glauber spread) and matches the Glauber-centrality
+convention. This makes the cumulant chain internally consistent: classical bins on
+multiplicity, ML bins on predicted $N_{\rm part}$, the oracle on true
+$N_{\rm part}$.
+
+\textbf{The role of $\phi$.} The per-particle azimuth $\phi$ is kept as an input.
+It carries centrality information through the flow-vector magnitudes $|Q_n|$
+(directed flow $v_1$ is large at FXT; elliptic $v_2$ is small and can be negative);
+only the absolute reaction-plane orientation $\Psi_{\rm RP}$ is the uniformly
+random nuisance. We do \emph{not} reconstruct the reaction plane --- event-plane
+resolution is poor at FXT multiplicities. Instead a per-event random $\phi$
+rotation augmentation (now applied in the canonical trainer) leaves all relative
+angles, and hence $|Q_n|$, invariant while randomizing $\Psi_{\rm RP}$, forcing
+the network to learn the rotation-invariant flow structure rather than memorize an
+orientation it cannot generalize from. A $(\cos\phi, \sin\phi)$ input encoding is
+tracked as an ablation.
+
+\textbf{Pipeline.} One canonical trainer (\code{train\_cached.py}) covers all seven
+architectures (MLP, MLP-pool, DeepSets, Set Transformer, EFN, PFN, GNN), adds
+event-feature normalization, and drops the truth-label dependency for training
+(the truth baseline is now only a classical comparison). A two-epoch DeepSets
+smoke run validated the full path end-to-end (test $b$-MAE $\approx0.53$\,fm,
+$N_{\rm part}$-MAE $\approx13$), already in the regime of the classical bar; the
+proper apples-to-apples comparison will come from the evaluation step on
+fully-trained models.
+
+\section{Deferred / next}
+\begin{itemize}
+  \item Confirm the UrQMD collision system / mass number behind the native
+        $N_{\rm part}$ header (Pb vs.\ Au); fall back to a $b$-only reported target
+        if it proves Pb-based.
+  \item $(\cos\phi,\sin\phi)$ encoding and $\phi$-augmentation on/off ablations.
+  \item Deep ensembles (5 seeds) for UQ robustness; cross-energy generalization
+        (train on three energies, test on the fourth).
+  \item Full training of all seven architectures, then rewire
+        \code{validate\_models.py} / \code{compute\_cumulants.py} to the new
+        prediction schema and the $N_{\rm part}$-based centrality.
+  \item $N_{\rm coll}$ as a third target (requires a cluster re-ingestion pass).
+\end{itemize}
+
+\end{document}
